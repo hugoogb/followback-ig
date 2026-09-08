@@ -2,8 +2,8 @@
 
 Find the people you follow on Instagram who **don't follow you back**, fully
 offline, so you can clean up your account. No login, no network, no API — it
-reads the JSON files from Instagram's data export and produces a clickable
-action list for fast manual unfollowing.
+reads Instagram's data export and produces a clickable action list for fast
+manual unfollowing.
 
 > Automated unfollowing is intentionally **not** included: it violates
 > Instagram's Terms of Service and risks action against your account.
@@ -16,104 +16,106 @@ information** → request an export with:
 - **Scope:** *Followers and following*
 - **Format:** *JSON*
 
-Unzip it and locate the `connections/followers_and_following/` folder. It
-contains `following.json` and one or more `followers_*.json` files.
+Instagram emails you a `.zip` when it's ready. **Download it and you're done —
+there is nothing to unzip and no folder to go looking for.**
 
 ## Usage
 
 ```bash
-python3 ig_followback.py instagram-yourname-2026-09-08.zip   # no unzipping needed
-python3 ig_followback.py /path/to/unzipped-export/           # the export root
-python3 ig_followback.py /path/to/connections/followers_and_following
+python3 ig_followback.py instagram-yourname-2026-09-08.zip
 ```
 
-Point it at the `.zip` Instagram gives you and it reads the archive directly.
-It also accepts the unzipped export root, or the data folder itself — it finds
-`following.json` wherever it sits. Or drop `ig_followback.py` into that folder
-and run it with no arguments. `--help` lists the options.
+That's the whole workflow. The script opens the archive, finds the
+`connections/followers_and_following/` data inside it wherever it happens to
+sit, and reads it in place.
 
-It prints a summary and writes these files into the directory you run it from
-(never into your export):
+If you'd rather unzip it anyway, it takes that too — point it at the export
+root or at the data folder itself, and all three behave identically:
+
+```bash
+python3 ig_followback.py /path/to/unzipped-export/
+python3 ig_followback.py /path/to/connections/followers_and_following
+python3 ig_followback.py            # or run it from inside that folder
+```
+
+`--help` lists the options.
+
+## What it writes
+
+A summary on stdout, plus these files **in the directory you run it from** —
+never inside your export:
 
 | File | What it is |
 |------|-----------|
-| `cleanup.html` | Action list — clickable profile links + checkboxes, sortable by follow date (oldest first, so stale follows surface) |
+| `cleanup.html` | The main action list — profile links, checkboxes, sortable by follow date (oldest first, so stale follows surface) |
 | `not_following_back.csv` | `username, profile_url, followed_on` for records/scripting |
 | `not_following_back.txt` | Bare usernames |
-| `pending_requests.html` | Action list of follow requests you've **sent** that haven't been accepted yet — clickable links + checkboxes, sortable by request date |
-| `pending_requests.csv` | `username, profile_url, requested_on` |
-| `pending_requests.txt` | Bare usernames |
-| `you_dont_follow_back.html` | Action list of accounts that follow **you** but you don't follow back |
-| `you_dont_follow_back.csv` | `username, profile_url, followed_you_on` |
-| `you_dont_follow_back.txt` | Bare usernames |
+| `pending_requests.*` | Follow requests you've **sent** that haven't been accepted yet, sortable by request date |
+| `you_dont_follow_back.*` | Accounts that follow **you** but you don't follow back |
 
-The `pending_requests.*` files are only written when your export contains a
-`pending_follow_requests.json` (i.e. you have outstanding requests to private
-accounts).
+Each list comes as `.html`, `.csv` and `.txt`. `pending_requests.*` is only
+written when your export contains a `pending_follow_requests.json` — that is,
+when you actually have outstanding requests to private accounts.
 
-Open `cleanup.html` in your browser, click each profile link to unfollow in the
-Instagram app, and tick the box to mark it done. Use `pending_requests.html` the
-same way to review and cancel stale requests.
+## Working through the list
 
-Your ticks are saved in the browser, so closing the tab part-way through a long
-list doesn't lose your progress, and a counter shows how many you've handled.
-There's also a filter box for jumping to a specific username.
+Open `cleanup.html`, click a profile link to unfollow in the Instagram app,
+and tick the box to mark it done. Every row also has:
+
+- **find** — searches Instagram for the username, which is how you recover an
+  account that was renamed. A direct link never can.
+- **copy** — copies the username to the clipboard.
+- **dead** — marks the row as gone.
+
+Your marks are saved in the browser, so closing the tab part-way through a long
+list doesn't lose your progress. A counter shows how many you've handled, and a
+filter box jumps to a specific username. Each list keeps its own marks.
 
 ## Broken profile links
 
-Some links will land on *"Sorry, this page isn't available."* Almost always the
-account was already gone **before** Instagram generated the export — deactivated,
-deleted, or banned. Instagram keeps such accounts in your following list (they
-still count towards your following total), so the export lists them faithfully
-and their profile URLs simply don't resolve.
+Some links land on *"Sorry, this page isn't available."* Almost always the
+account was already gone **before** Instagram generated the export —
+deactivated, deleted, or banned. Instagram keeps such accounts in your
+following list, so the export lists them faithfully and their URLs don't
+resolve. Renames are a much rarer cause, since the export records each username
+as of the moment the file was generated.
 
-Renames are a much rarer cause: the export records each username as of the
-moment the file was generated, so unless you leave the export sitting around for
-weeks before running the script, a name has to change in that short window to
-break. The export carries no account ID, so there is no offline way to tell a
-deleted account from a renamed one.
+The export carries no account ID, so there is no offline way to tell a deleted
+account from a renamed one.
 
-Accounts that were deactivated or banned generally **can't be unfollowed from
-their profile** — there's no profile left to open. Unfollow them from your own
-following list in the app, or just mark them dead and move on.
+**These usually can't be unfollowed from their profile** — there's no profile
+left to open. Use **copy**, then in the app open your profile → **Following**,
+paste the username into the search box in that list, and tap
+**Following → Unfollow**. If it doesn't appear there, Instagram has already
+removed it, there is nothing left to unfollow, and it will drop out of your
+next export by itself.
 
-Each row therefore has two extra affordances:
+Instagram has no bulk unfollow, so this is one account at a time. Unless you're
+near the 7,500 following cap, marking them **dead** and moving on is usually the
+better use of your time.
 
-- **find** — searches Instagram for the username. This is the one that recovers
-  a renamed account, which a direct link can never do.
-- **dead** — marks the row as gone. It stays marked across reloads.
-- **copy** — copies the username to the clipboard.
-
-The copy button exists because a deactivated or banned account has no profile
-page left to open, so the only way to unfollow it is from your own list:
-open your profile → **Following**, paste the username into the search box in
-that list, and tap **Following → Unfollow**. If it doesn't show up there,
-Instagram has already removed it and there is nothing left to unfollow — it
-will drop out of your next export by itself.
-
-Note that Instagram has no bulk unfollow, so this is one account at a time.
-Unless you are near the 7,500 following cap, marking these **dead** and
-ignoring them is usually the better use of your time.
-
-Once you've marked the dead ones, press **Save ignore.txt** and put the
-downloaded file next to the script. Those accounts are then hidden from every
-future run, so you never re-triage the same broken links after your next export:
-
-```bash
-python3 ig_followback.py <export folder>              # honours ./ignore.txt
-python3 ig_followback.py <export folder> --ignore mine.txt
-python3 ig_followback.py <export folder> --no-ignore  # show everything again
-```
-
-`ignore.txt` is one username per line; blank lines and `#` comments are
-skipped, a leading `@` is fine, and matching is case-insensitive.
-
-> **Why not just check the links automatically?** Instagram's official Graph API
+> **Why not check the links automatically?** Instagram's official Graph API
 > returns a follower *count*, never the list, and only for Business accounts.
 > Checking each profile would mean either scraping Instagram while logged out
 > (which mostly returns a login wall) or using the private mobile API with your
 > password — which violates Instagram's Terms of Service and risks your account.
 > Neither belongs in a tool whose whole point is that it runs offline.
+
+## Hiding accounts you've dealt with: `ignore.txt`
+
+Dead accounts reappear in every export, so without this you'd re-triage the same
+broken links forever. Mark them **dead**, press **Save ignore.txt**, and put the
+downloaded file next to the script:
+
+```bash
+python3 ig_followback.py export.zip                    # honours ./ignore.txt
+python3 ig_followback.py export.zip --ignore mine.txt  # use a different file
+python3 ig_followback.py export.zip --no-ignore        # show everything again
+```
+
+One username per line; blank lines and `#` comments are skipped, a leading `@`
+is fine, and matching is case-insensitive. The run summary always tells you how
+many accounts were hidden, so nothing disappears silently.
 
 ## Output categories
 
@@ -122,10 +124,14 @@ skipped, a leading `@` is fine, and matching is case-insensitive.
 - **Mutuals** — count of accounts following each other
 - **Pending sent requests** — follow requests you've sent to private accounts that haven't been accepted yet
 
+If your export contains entries the script can't read a username from, it says
+so at the end of the run rather than dropping them silently.
+
 ## Privacy
 
-Everything runs locally. Your export files and the generated lists are
-git-ignored so your personal data never leaves your machine.
+Everything runs locally and nothing is ever sent anywhere. Your export, the
+generated lists and your `ignore.txt` are all git-ignored, so your personal data
+stays on your machine.
 
 ## Development
 
