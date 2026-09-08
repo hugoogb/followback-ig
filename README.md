@@ -53,13 +53,21 @@ There's also a filter box for jumping to a specific username.
 
 ## Broken profile links
 
-Some links will land on *"Sorry, this page isn't available."* The export lists
-the username as it was when Instagram generated the file, and it carries no
-account ID, so there is no offline way to tell these three cases apart:
+Some links will land on *"Sorry, this page isn't available."* Almost always the
+account was already gone **before** Instagram generated the export — deactivated,
+deleted, or banned. Instagram keeps such accounts in your following list (they
+still count towards your following total), so the export lists them faithfully
+and their profile URLs simply don't resolve.
 
-- the account was **deleted** or **deactivated**
-- the account was **banned** by Instagram
-- the account **changed its username** — the person is still there, at a new URL
+Renames are a much rarer cause: the export records each username as of the
+moment the file was generated, so unless you leave the export sitting around for
+weeks before running the script, a name has to change in that short window to
+break. The export carries no account ID, so there is no offline way to tell a
+deleted account from a renamed one.
+
+Accounts that were deactivated or banned generally **can't be unfollowed from
+their profile** — there's no profile left to open. Unfollow them from your own
+following list in the app, or just mark them dead and move on.
 
 Each row therefore has two extra affordances:
 

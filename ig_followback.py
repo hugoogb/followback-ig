@@ -32,7 +32,7 @@ import html
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -41,6 +41,93 @@ from urllib.parse import quote
 # --------------------------------------------------------------------------- #
 # Parsing
 # --------------------------------------------------------------------------- #
+
+# Instagram usernames are letters, digits, periods and underscores, max 30.
+# Anything else that lands in a username field is a display name or a stray
+# label, and would build a profile URL that is guaranteed to 404.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+# Matches the plain web profile URL and the `/_u/<user>` app deeplink the
+# export actually contains.
+_HREF_RE = re.compile(r"instagram\.com/(?:_u/)?([A-Za-z0-9._]{1,30})/?$")
+
+# "Username" as Instagram writes it in a few common export languages. Only a
+# hint -- parsing falls back to the shape of the value, so an export in an
+# unlisted language still works.
+_USERNAME_LABELS = {
+    "username", "nombre de usuario", "nom d'utilisateur", "nome utente",
+    "benutzername", "nome de usuário", "gebruikersnaam", "användarnamn",
+    "kullanıcı adı", "nazwa użytkownika", "имя пользователя", "ユーザーネーム",
+    "사용자 이름", "用户名",
+}
+
+
+@dataclass
+class ParseStats:
+    """Anomalies noticed while reading an export, surfaced to the user.
+
+    Broken profile links are the symptom these explain: a block whose username
+    could not be read produces no row at all, and one that yielded something
+    that isn't a username produces a row whose link cannot resolve.
+    """
+    skipped: int = 0
+    suspicious: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.skipped + len(self.suspicious)
+
+
+def _username_from_href(href) -> str:
+    """Pull the username out of a profile href, or "" if there isn't one."""
+    match = _HREF_RE.search((href or "").strip())
+    return match.group(1) if match else ""
+
+
+def _label_value_candidates(pairs) -> list[str]:
+    """Username candidates from a `label_values` list, best last.
+
+    The labels are localised, so a label match is only a hint. The reliable
+    signal is the shape of the value: a username has no spaces and fits the
+    Instagram character set, while a display name usually doesn't.
+    """
+    labelled, shaped = [], []
+    for pair in pairs:
+        label = (pair.get("label") or "").strip().casefold()
+        value = (pair.get("value") or "").strip()
+        if not value:
+            continue
+        if label in _USERNAME_LABELS:
+            labelled.append(value)
+        elif _USERNAME_RE.match(value):
+            shaped.append(value)
+    # Instagram orders Name before Username, so a later shaped value is the
+    # better guess; an explicitly labelled one beats both.
+    return list(reversed(shaped)) + labelled
+
+
+def _username_candidates(block) -> list[str]:
+    """Every place a username might live in one block, best first.
+
+    The href comes first because it is the only source identical in every
+    language and never holds a display name -- it is what makes a link work.
+    """
+    hrefs, values = [], []
+    for item in block.get("string_list_data") or []:
+        from_href = _username_from_href(item.get("href"))
+        if from_href:
+            hrefs.append(from_href)
+        value = (item.get("value") or "").strip()
+        if value:
+            values.append(value)
+
+    candidates = hrefs + values
+    candidates += reversed(_label_value_candidates(block.get("label_values") or []))
+    title = (block.get("title") or "").strip()
+    if title:
+        candidates.append(title)
+    return candidates
+
 
 def _username_and_timestamp(block) -> tuple[str, int | None]:
     """Pull (username, timestamp) from one IG relationship block.
@@ -52,30 +139,23 @@ def _username_and_timestamp(block) -> tuple[str, int | None]:
       - pending:    no string_list_data at all; label_values holds a
                     {"label": "Username", "value": ...} pair, and the
                     timestamp is on the block itself
-    This tries each location so all three parse correctly.
+    Every location is tried, and a candidate that actually looks like a
+    username wins over one that doesn't -- otherwise a display name sitting in
+    a "title" would become a profile URL that cannot resolve.
     """
-    username = ""
     timestamp = block.get("timestamp")  # block-level (pending requests)
-
     for item in block.get("string_list_data") or []:
-        value = (item.get("value") or "").strip()
-        if value:
-            username = value
         if item.get("timestamp"):
             timestamp = item["timestamp"]
 
-    if not username:
-        for pair in block.get("label_values") or []:
-            if pair.get("label") == "Username":
-                username = (pair.get("value") or "").strip()
-
-    if not username:
-        username = (block.get("title") or "").strip()
-
-    return username, timestamp
+    candidates = _username_candidates(block)
+    valid = next((c for c in candidates if _USERNAME_RE.match(c)), "")
+    # Fall back to an unusable candidate rather than dropping the account: the
+    # row is still worth showing, and its "find" link can search for it.
+    return (valid or (candidates[0] if candidates else "")), timestamp
 
 
-def _extract_accounts(blocks) -> dict[str, dict]:
+def _extract_accounts(blocks, stats: ParseStats | None = None) -> dict[str, dict]:
     """Pull accounts out of a list of IG relationship blocks.
 
     Returns a mapping username -> {"href": str, "timestamp": int | None}.
@@ -87,7 +167,11 @@ def _extract_accounts(blocks) -> dict[str, dict]:
     for block in blocks:
         username, timestamp = _username_and_timestamp(block)
         if not username:
+            if stats is not None:
+                stats.skipped += 1
             continue
+        if stats is not None and not _USERNAME_RE.match(username):
+            stats.suspicious.append(username)
         accounts[username] = {
             "href": f"https://instagram.com/{username}",
             "timestamp": timestamp,
@@ -95,17 +179,17 @@ def _extract_accounts(blocks) -> dict[str, dict]:
     return accounts
 
 
-def _load_following(folder: Path) -> dict[str, dict]:
+def _load_following(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
     path = folder / "following.json"
     if not path.exists():
         sys.exit(f"Could not find {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     # following.json is a dict keyed by "relationships_following"
     blocks = data["relationships_following"] if isinstance(data, dict) else data
-    return _extract_accounts(blocks)
+    return _extract_accounts(blocks, stats)
 
 
-def _load_followers(folder: Path) -> dict[str, dict]:
+def _load_followers(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
     # Instagram splits large follower lists: followers_1.json, followers_2.json, ...
     files = sorted(folder.glob("followers_*.json"))
     if not files and (folder / "followers.json").exists():
@@ -117,16 +201,17 @@ def _load_followers(folder: Path) -> dict[str, dict]:
         data = json.loads(f.read_text(encoding="utf-8"))
         # followers files are usually a top-level list
         blocks = data if isinstance(data, list) else data.get("relationships_followers", [])
-        accounts.update(_extract_accounts(blocks))
+        accounts.update(_extract_accounts(blocks, stats))
     return accounts
 
 
-def load_accounts(folder: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+def load_accounts(folder: Path,
+                  stats: ParseStats | None = None) -> tuple[dict[str, dict], dict[str, dict]]:
     """Load (following, followers) from an export folder."""
-    return _load_following(folder), _load_followers(folder)
+    return _load_following(folder, stats), _load_followers(folder, stats)
 
 
-def load_pending_requests(folder: Path) -> dict[str, dict]:
+def load_pending_requests(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
     """Load follow requests you've SENT that are still pending.
 
     Reads pending_follow_requests.json (private accounts you asked to follow
@@ -141,7 +226,7 @@ def load_pending_requests(folder: Path) -> dict[str, dict]:
     # pending_follow_requests.json is a dict keyed by
     # "relationships_follow_requests_sent"; tolerate a bare list too.
     blocks = data if isinstance(data, list) else data.get("relationships_follow_requests_sent", [])
-    return _extract_accounts(blocks)
+    return _extract_accounts(blocks, stats)
 
 
 # --------------------------------------------------------------------------- #
@@ -500,10 +585,11 @@ def main(argv: list[str] | None = None) -> None:
     folder = args.folder
     out_dir = Path.cwd()
 
-    following, followers = load_accounts(folder)
+    stats = ParseStats()
+    following, followers = load_accounts(folder, stats)
     diff = compute_diff(following, followers)
     candidates = diff.not_following_back
-    pending_accounts = load_pending_requests(folder)
+    pending_accounts = load_pending_requests(folder, stats)
     pending = _sorted_records(set(pending_accounts), pending_accounts)
 
     ignore_path = args.ignore or (out_dir / IGNORE_FILENAME)
@@ -536,9 +622,24 @@ def main(argv: list[str] | None = None) -> None:
           + ". Open the action list(s):")
     for path in written:
         print(f"  {path}")
-    print(f"\nBroken profile link? The account was deleted, banned or renamed. Use the"
-          f"\n'find' link to search for it, or mark it 'dead' and save {IGNORE_FILENAME}"
-          f"\nnext to this script to keep it out of future runs.")
+    if stats.total:
+        print(f"\nParsing notes for this export:")
+        if stats.skipped:
+            one = stats.skipped == 1
+            print(f"  {stats.skipped} entr{'y' if one else 'ies'} had no readable "
+                  f"username and {'was' if one else 'were'} left out.")
+        if stats.suspicious:
+            count, one = len(stats.suspicious), len(stats.suspicious) == 1
+            shown = ", ".join(stats.suspicious[:5])
+            more = f" (+{count - 5} more)" if count > 5 else ""
+            print(f"  {count} entr{'y' if one else 'ies'} did not look like a username, "
+                  f"so {'its link' if one else 'their links'} will not resolve: "
+                  f"{shown}{more}")
+
+    print(f"\nBroken profile link? The account was most likely deleted, deactivated or"
+          f"\nbanned before this export was generated -- Instagram keeps those in your"
+          f"\nfollowing list. Use the 'find' link to search for it, or mark it 'dead'"
+          f"\nand save {IGNORE_FILENAME} next to this script to keep it out of future runs.")
 
 
 if __name__ == "__main__":
