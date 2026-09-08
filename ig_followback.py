@@ -344,7 +344,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
   a { color: #0a66c2; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .find { font-size: .8rem; color: #888; margin-left: .5rem; }
-  .dead { font-size: .8rem; padding: .15rem .45rem; }
+  .dead, .copy { font-size: .8rem; padding: .15rem .45rem; }
+  .copy { margin-right: .25rem; }
   tr.gone .dead { background: #fde68a; border-color: #d97706; }
   .hint { color: #999; font-size: .85rem; }
   .note { background: #f7f7f7; border-left: 3px solid #ddd; padding: .6rem .8rem; margin: 1rem 0; font-size: .9rem; color: #555; }
@@ -404,7 +405,37 @@ tbody.addEventListener('change', e => {
   paint(tr); save(); count();
 });
 
+// A dead account has no profile page to open, so the way to unfollow it is to
+// paste its username into the search box of your own Following list.
+async function copyUsername(btn) {
+  const name = btn.closest('tr').dataset.username;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(name);
+    ok = true;
+  } catch (err) {
+    // The async clipboard API needs a secure context, which a file:// page is
+    // not in every browser; fall back to the old selection-based copy.
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = name;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (err2) {
+      ok = false;
+    }
+  }
+  btn.textContent = ok ? 'copied' : 'failed';
+  setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+}
+
 tbody.addEventListener('click', e => {
+  if (e.target.classList.contains('copy')) { copyUsername(e.target); return; }
   if (!e.target.classList.contains('dead')) return;
   const tr = e.target.closest('tr');
   if (state[tr.dataset.username] === 'gone') delete state[tr.dataset.username];
@@ -480,7 +511,8 @@ def _render_action_list(title: str, intro: str, records: list[dict],
             f'<td><a class="u" href="{url}" target="_blank" rel="noopener">{user}</a>'
             f'<a class="find" href="{find}" target="_blank" rel="noopener">find</a></td>'
             f'<td>{html.escape(acc["followed_on"])}</td>'
-            f'<td><button class="dead" type="button" title="Deleted, banned or renamed">dead</button></td>'
+            f'<td><button class="copy" type="button" title="Copy username, to paste into your Following list search">copy</button>'
+            f'<button class="dead" type="button" title="Deleted, banned or renamed">dead</button></td>'
             f'</tr>'
         )
     # A per-list key so the two action lists don't share triage marks.
