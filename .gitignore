@@ -2,10 +2,24 @@
 __pycache__/
 *.pyc
 
-# Instagram export data — keep your personal data OUT of git
-*.json
-followers_*.json
+# Instagram export data — keep your personal data OUT of git.
+# Listed by name rather than a blanket *.json, so the repo can carry its own
+# JSON (fixtures, config) without it being silently untracked.
+followers*.json
 following.json
+pending_follow_requests.json
+close_friends.json
+blocked_profiles.json
+recently_unfollowed_profiles.json
+recent_follow_requests.json
+removed_suggestions.json
+hide_story_from.json
+follow_requests_you*.json
+
+# The export archive and the folder it unzips to
+instagram-*.zip
+meta-*.zip
+instagram-*/
 
 # Your personal ignore list (usernames)
 ignore.txt
@@ -17,3 +31,6 @@ not_following_back.txt
 pending_requests.html
 pending_requests.csv
 pending_requests.txt
+you_dont_follow_back.html
+you_dont_follow_back.csv
+you_dont_follow_back.txt

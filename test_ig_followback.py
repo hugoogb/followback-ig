@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -374,12 +375,162 @@ class UsernameExtractionTests(unittest.TestCase):
         # Nothing resolvable anywhere: keep the row so the user can still
         # search for it, but say so rather than pretending the link works.
         accounts, stats = self._one({"title": "Marta Murcia"})
-        self.assertEqual(list(accounts), ["Marta Murcia"])
+        self.assertEqual(list(accounts), ["marta murcia"])  # key is casefolded
+        self.assertEqual(accounts["marta murcia"]["display"], "Marta Murcia")
         self.assertEqual(stats.suspicious, ["Marta Murcia"])
 
     def test_plain_username_entries_are_not_flagged(self):
         _accounts, stats = self._one(_block("alice", timestamp=1))
         self.assertEqual(stats.total, 0)
+
+
+class CaseFoldingTests(unittest.TestCase):
+    """following.json and followers_*.json are matched by key, so casing drift
+    between the two files must not invent or destroy a relationship."""
+
+    def _accounts(self, name, timestamp):
+        return ig._extract_accounts([_block(name, timestamp=timestamp)])
+
+    def test_casing_difference_still_counts_as_a_mutual(self):
+        following = self._accounts("Hugo.GB", 100)
+        followers = self._accounts("hugo.gb", 200)
+        diff = ig.compute_diff(following, followers)
+        self.assertEqual(diff.mutuals, 1)
+        self.assertEqual(diff.not_following_back, [])
+        self.assertEqual(diff.fans_you_dont_follow_back, [])
+
+    def test_display_keeps_the_original_spelling(self):
+        following = self._accounts("Hugo.GB", 100)
+        followers = self._accounts("someone.else", 200)
+        diff = ig.compute_diff(following, followers)
+        record = diff.not_following_back[0]
+        self.assertEqual(record["username"], "Hugo.GB")
+        self.assertEqual(record["profile_url"], "https://instagram.com/Hugo.GB")
+
+
+class ExportErrorTests(unittest.TestCase):
+    """Loaders raise so the module is importable as a library; only the CLI exits."""
+
+    def test_missing_following_raises_rather_than_exiting(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ig.ExportError):
+                ig.load_accounts(Path(d))
+
+    def test_missing_followers_raises_rather_than_exiting(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "following.json").write_text(
+                json.dumps({"relationships_following": []}), encoding="utf-8")
+            with self.assertRaises(ig.ExportError):
+                ig.load_accounts(Path(d))
+
+    def test_cli_turns_the_error_into_a_clean_exit(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as caught:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    ig.main([d])
+            self.assertNotEqual(caught.exception.code, 0)
+
+
+class ExportSourceTests(unittest.TestCase):
+    """A zip, the folder it unzips to, and the data folder must behave alike."""
+
+    EXPORT_SUBDIR = "instagram-user-2026-09-08-abc/connections/followers_and_following"
+
+    def _build(self, root: Path) -> Path:
+        folder = root / self.EXPORT_SUBDIR
+        folder.mkdir(parents=True)
+        (folder / "following.json").write_text(json.dumps({
+            "relationships_following": [_block("alice", timestamp=100),
+                                        _block("ghosty", timestamp=200)]}),
+            encoding="utf-8")
+        (folder / "followers_1.json").write_text(
+            json.dumps([_block("alice", timestamp=300)]), encoding="utf-8")
+        # Noise elsewhere in the archive must not confuse the lookup.
+        other = root / "instagram-user-2026-09-08-abc" / "messages"
+        other.mkdir(parents=True)
+        (other / "inbox.json").write_text("{}", encoding="utf-8")
+        return folder
+
+    def _expect(self, source):
+        following, followers = ig.load_accounts(source)
+        self.assertEqual(set(following), {"alice", "ghosty"})
+        self.assertEqual(set(followers), {"alice"})
+
+    def test_reads_the_data_folder_directly(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._expect(self._build(Path(d)))
+
+    def test_finds_the_data_folder_from_the_unzipped_export_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._build(Path(d))
+            self._expect(Path(d) / "instagram-user-2026-09-08-abc")
+
+    def test_reads_straight_out_of_a_zip(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "src"
+            root.mkdir()
+            self._build(root)
+            archive = Path(d) / "export.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                for item in root.rglob("*"):
+                    if item.is_file():
+                        zf.write(item, item.relative_to(root))
+            self._expect(archive)
+
+    def test_pending_requests_read_from_a_zip_too(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "src"
+            folder = self._build(root)
+            (folder / "pending_follow_requests.json").write_text(json.dumps({
+                "relationships_follow_requests_sent": [
+                    _block("private.acct", timestamp=5)]}), encoding="utf-8")
+            archive = Path(d) / "export.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                for item in root.rglob("*"):
+                    if item.is_file():
+                        zf.write(item, item.relative_to(root))
+            self.assertEqual(set(ig.load_pending_requests(archive)), {"private.acct"})
+
+    def test_a_non_archive_file_is_rejected_clearly(self):
+        with tempfile.TemporaryDirectory() as d:
+            junk = Path(d) / "notes.txt"
+            junk.write_text("hello", encoding="utf-8")
+            with self.assertRaises(ig.ExportError):
+                ig.open_export(junk)
+
+    def test_missing_path_is_rejected_clearly(self):
+        with self.assertRaises(ig.ExportError):
+            ig.open_export(Path("/definitely/not/here"))
+
+
+class FansOutputTests(unittest.TestCase):
+    """The follow-you-back list was computed every run and thrown away."""
+
+    def test_writes_a_list_for_accounts_you_dont_follow_back(self):
+        with tempfile.TemporaryDirectory() as src_d, tempfile.TemporaryDirectory() as run_d:
+            src, run = Path(src_d), Path(run_d)
+            (src / "following.json").write_text(json.dumps({
+                "relationships_following": [_block("alice", timestamp=100)]}),
+                encoding="utf-8")
+            (src / "followers.json").write_text(json.dumps([
+                _block("alice", timestamp=1), _block("superfan", timestamp=2)]),
+                encoding="utf-8")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(run)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ig.main([str(src)])
+            finally:
+                os.chdir(old_cwd)
+            self.assertEqual((run / "you_dont_follow_back.txt").read_text(), "superfan")
+            self.assertIn("followed_you_on", (run / "you_dont_follow_back.csv").read_text())
+
+    def test_each_list_keeps_its_own_triage_marks(self):
+        # Shared localStorage would let a tick on one list mark the other.
+        keys = {ig._render_action_list(t, "i", []).split("const KEY = ")[1].split(chr(10))[0]
+                for t in ("Not following you back", "You don't follow them back",
+                          "Pending sent follow requests")}
+        self.assertEqual(len(keys), 3)
 
 
 if __name__ == "__main__":
