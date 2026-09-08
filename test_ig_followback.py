@@ -301,6 +301,11 @@ class DeadLinkAffordanceTests(unittest.TestCase):
     def test_row_offers_a_dead_marker(self):
         self.assertIn('class="dead"', self._render())
 
+    def test_row_offers_a_copy_button(self):
+        # A dead account has no profile to open: unfollowing it means pasting
+        # the username into the search box of your own Following list.
+        self.assertIn('class="copy"', self._render())
+
     def test_no_unreplaced_placeholders(self):
         self.assertNotIn("__", self._render())
 

@@ -74,6 +74,18 @@ Each row therefore has two extra affordances:
 - **find** — searches Instagram for the username. This is the one that recovers
   a renamed account, which a direct link can never do.
 - **dead** — marks the row as gone. It stays marked across reloads.
+- **copy** — copies the username to the clipboard.
+
+The copy button exists because a deactivated or banned account has no profile
+page left to open, so the only way to unfollow it is from your own list:
+open your profile → **Following**, paste the username into the search box in
+that list, and tap **Following → Unfollow**. If it doesn't show up there,
+Instagram has already removed it and there is nothing left to unfollow — it
+will drop out of your next export by itself.
+
+Note that Instagram has no bulk unfollow, so this is one account at a time.
+Unless you are near the 7,500 following cap, marking these **dead** and
+ignoring them is usually the better use of your time.
 
 Once you've marked the dead ones, press **Save ignore.txt** and put the
 downloaded file next to the script. Those accounts are then hidden from every
