@@ -26,6 +26,7 @@ python3 ig_followback.py /path/to/connections/followers_and_following
 ```
 
 Or drop `ig_followback.py` into that folder and run it with no arguments.
+`--help` lists the options.
 
 It prints a summary and writes these files into the export folder:
 
@@ -45,6 +46,46 @@ accounts).
 Open `cleanup.html` in your browser, click each profile link to unfollow in the
 Instagram app, and tick the box to mark it done. Use `pending_requests.html` the
 same way to review and cancel stale requests.
+
+Your ticks are saved in the browser, so closing the tab part-way through a long
+list doesn't lose your progress, and a counter shows how many you've handled.
+There's also a filter box for jumping to a specific username.
+
+## Broken profile links
+
+Some links will land on *"Sorry, this page isn't available."* The export lists
+the username as it was when Instagram generated the file, and it carries no
+account ID, so there is no offline way to tell these three cases apart:
+
+- the account was **deleted** or **deactivated**
+- the account was **banned** by Instagram
+- the account **changed its username** — the person is still there, at a new URL
+
+Each row therefore has two extra affordances:
+
+- **find** — searches Instagram for the username. This is the one that recovers
+  a renamed account, which a direct link can never do.
+- **dead** — marks the row as gone. It stays marked across reloads.
+
+Once you've marked the dead ones, press **Save ignore.txt** and put the
+downloaded file next to the script. Those accounts are then hidden from every
+future run, so you never re-triage the same broken links after your next export:
+
+```bash
+python3 ig_followback.py <export folder>              # honours ./ignore.txt
+python3 ig_followback.py <export folder> --ignore mine.txt
+python3 ig_followback.py <export folder> --no-ignore  # show everything again
+```
+
+`ignore.txt` is one username per line; blank lines and `#` comments are
+skipped, a leading `@` is fine, and matching is case-insensitive.
+
+> **Why not just check the links automatically?** Instagram's official Graph API
+> returns a follower *count*, never the list, and only for Business accounts.
+> Checking each profile would mean either scraping Instagram while logged out
+> (which mostly returns a login wall) or using the private mobile API with your
+> password — which violates Instagram's Terms of Service and risks your account.
+> Neither belongs in a tool whose whole point is that it runs offline.
 
 ## Output categories
 
