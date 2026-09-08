@@ -311,5 +311,71 @@ class DeadLinkAffordanceTests(unittest.TestCase):
         self.assertIn("\\n", ig._HTML_TEMPLATE)
 
 
+class UsernameExtractionTests(unittest.TestCase):
+    """A link that 404s because the script built it wrong is the worst kind."""
+
+    def _one(self, block):
+        stats = ig.ParseStats()
+        accounts = ig._extract_accounts([block], stats)
+        return accounts, stats
+
+    def test_href_beats_a_display_name_in_title(self):
+        # Regression: this built "https://instagram.com/Marta Murcia".
+        accounts, _ = self._one({
+            "title": "Marta Murcia",
+            "string_list_data": [
+                {"href": "https://www.instagram.com/_u/marta.murcia", "timestamp": 1}]})
+        self.assertEqual(list(accounts), ["marta.murcia"])
+        self.assertEqual(accounts["marta.murcia"]["href"],
+                         "https://instagram.com/marta.murcia")
+
+    def test_href_beats_a_display_name_in_value(self):
+        accounts, _ = self._one({"string_list_data": [
+            {"value": "Jay Wheeler PR",
+             "href": "https://www.instagram.com/jaywheelerpr", "timestamp": 3}]})
+        self.assertEqual(list(accounts), ["jaywheelerpr"])
+
+    def test_recovers_account_when_only_the_href_has_the_username(self):
+        # Regression: this entry was dropped silently.
+        accounts, stats = self._one({
+            "title": "",
+            "string_list_data": [
+                {"href": "https://www.instagram.com/_u/ghosty", "timestamp": 2}]})
+        self.assertEqual(list(accounts), ["ghosty"])
+        self.assertEqual(stats.skipped, 0)
+
+    def test_localised_label_values_still_parse(self):
+        # A Spanish export labels the field "Nombre de usuario"; the value's
+        # shape identifies it even when the label is unknown.
+        accounts, _ = self._one({"timestamp": 9, "label_values": [
+            {"label": "URL", "value": ""},
+            {"label": "Nombre", "value": "Marta Murcia"},
+            {"label": "Nombre de usuario", "value": "marta.murcia"}]})
+        self.assertEqual(list(accounts), ["marta.murcia"])
+
+    def test_unknown_label_falls_back_to_value_shape(self):
+        accounts, _ = self._one({"timestamp": 9, "label_values": [
+            {"label": "Nimi", "value": "Marta Murcia"},
+            {"label": "Kasutajanimi", "value": "marta.murcia"}]})
+        self.assertEqual(list(accounts), ["marta.murcia"])
+
+    def test_unreadable_entry_is_counted_not_silently_dropped(self):
+        accounts, stats = self._one(
+            {"title": "", "string_list_data": [{"href": "", "timestamp": 4}]})
+        self.assertEqual(accounts, {})
+        self.assertEqual(stats.skipped, 1)
+
+    def test_unusable_username_is_kept_but_flagged(self):
+        # Nothing resolvable anywhere: keep the row so the user can still
+        # search for it, but say so rather than pretending the link works.
+        accounts, stats = self._one({"title": "Marta Murcia"})
+        self.assertEqual(list(accounts), ["Marta Murcia"])
+        self.assertEqual(stats.suspicious, ["Marta Murcia"])
+
+    def test_plain_username_entries_are_not_flagged(self):
+        _accounts, stats = self._one(_block("alice", timestamp=1))
+        self.assertEqual(stats.total, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
