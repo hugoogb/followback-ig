@@ -231,5 +231,85 @@ class RenderActionListTests(unittest.TestCase):
         self.assertIn("ghosty", out)
 
 
+class IgnoreListTests(unittest.TestCase):
+    def test_parses_comments_blanks_at_prefix_and_casing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ignore.txt"
+            path.write_text(
+                "# a comment\n"
+                "@Deleted.Acct\n"
+                "\n"
+                "Renamed.User   # trailing comment\n",
+                encoding="utf-8")
+            self.assertEqual(ig.load_ignore_list(path),
+                             {"deleted.acct", "renamed.user"})
+
+    def test_missing_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(ig.load_ignore_list(Path(d) / "nope.txt"), set())
+
+    def test_apply_filters_case_insensitively_and_counts(self):
+        records = [ig._to_record(u, {"timestamp": 1})
+                   for u in ("keep", "DropMe")]
+        kept, hidden = ig.apply_ignore_list(records, {"dropme"})
+        self.assertEqual([r["username"] for r in kept], ["keep"])
+        self.assertEqual(hidden, 1)
+
+    def test_empty_ignore_list_is_a_passthrough(self):
+        records = [ig._to_record("keep", {"timestamp": 1})]
+        kept, hidden = ig.apply_ignore_list(records, set())
+        self.assertEqual(kept, records)
+        self.assertEqual(hidden, 0)
+
+    def test_main_hides_ignored_accounts_unless_no_ignore(self):
+        with tempfile.TemporaryDirectory() as src_d, tempfile.TemporaryDirectory() as run_d:
+            src, run = Path(src_d), Path(run_d)
+            (src / "following.json").write_text(json.dumps({
+                "relationships_following": [_block("ghost", timestamp=100),
+                                            _block("dead", timestamp=200)]}),
+                encoding="utf-8")
+            (src / "followers.json").write_text("[]", encoding="utf-8")
+            (run / "ignore.txt").write_text("dead\n", encoding="utf-8")
+
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(run)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ig.main([str(src)])
+                self.assertEqual((run / "not_following_back.txt").read_text(), "ghost")
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ig.main([str(src), "--no-ignore"])
+                self.assertIn("dead", (run / "not_following_back.txt").read_text())
+            finally:
+                os.chdir(old_cwd)
+
+
+class DeadLinkAffordanceTests(unittest.TestCase):
+    """The action list has to stay usable when a profile link 404s."""
+
+    def _render(self):
+        records = [ig._to_record("gone.user",
+                                 {"href": "https://instagram.com/gone.user",
+                                  "timestamp": 100})]
+        return ig._render_action_list("Not following you back", "intro", records)
+
+    def test_row_offers_a_search_fallback_for_renamed_accounts(self):
+        out = self._render()
+        self.assertIn(ig._search_url("gone.user"), out)
+
+    def test_row_offers_a_dead_marker(self):
+        self.assertIn('class="dead"', self._render())
+
+    def test_no_unreplaced_placeholders(self):
+        self.assertNotIn("__", self._render())
+
+    def test_template_keeps_js_newline_escape_intact(self):
+        # Regression: as a non-raw Python string the template's "\n" escapes
+        # became real newlines, splitting a JS string literal across lines and
+        # killing every script on the page.
+        self.assertIn("\\n", ig._HTML_TEMPLATE)
+
+
 if __name__ == "__main__":
     unittest.main()
