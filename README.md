@@ -22,13 +22,18 @@ contains `following.json` and one or more `followers_*.json` files.
 ## Usage
 
 ```bash
+python3 ig_followback.py instagram-yourname-2026-09-08.zip   # no unzipping needed
+python3 ig_followback.py /path/to/unzipped-export/           # the export root
 python3 ig_followback.py /path/to/connections/followers_and_following
 ```
 
-Or drop `ig_followback.py` into that folder and run it with no arguments.
-`--help` lists the options.
+Point it at the `.zip` Instagram gives you and it reads the archive directly.
+It also accepts the unzipped export root, or the data folder itself — it finds
+`following.json` wherever it sits. Or drop `ig_followback.py` into that folder
+and run it with no arguments. `--help` lists the options.
 
-It prints a summary and writes these files into the export folder:
+It prints a summary and writes these files into the directory you run it from
+(never into your export):
 
 | File | What it is |
 |------|-----------|
@@ -38,6 +43,9 @@ It prints a summary and writes these files into the export folder:
 | `pending_requests.html` | Action list of follow requests you've **sent** that haven't been accepted yet — clickable links + checkboxes, sortable by request date |
 | `pending_requests.csv` | `username, profile_url, requested_on` |
 | `pending_requests.txt` | Bare usernames |
+| `you_dont_follow_back.html` | Action list of accounts that follow **you** but you don't follow back |
+| `you_dont_follow_back.csv` | `username, profile_url, followed_you_on` |
+| `you_dont_follow_back.txt` | Bare usernames |
 
 The `pending_requests.*` files are only written when your export contains a
 `pending_follow_requests.json` (i.e. you have outstanding requests to private

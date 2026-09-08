@@ -32,10 +32,16 @@ import html
 import json
 import re
 import sys
+import zipfile
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
+
+
+class ExportError(Exception):
+    """The export could not be located or read. Carries a message for the user."""
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +164,13 @@ def _username_and_timestamp(block) -> tuple[str, int | None]:
 def _extract_accounts(blocks, stats: ParseStats | None = None) -> dict[str, dict]:
     """Pull accounts out of a list of IG relationship blocks.
 
-    Returns a mapping username -> {"href": str, "timestamp": int | None}.
+    Returns a mapping casefolded_username -> {"href", "timestamp", "display"}.
+
+    Keys are casefolded because following.json and followers_*.json are matched
+    against each other by key: a casing difference between the two files would
+    otherwise invent a "doesn't follow you back" and lose a mutual. "display"
+    keeps the username as Instagram wrote it, for showing and for links.
+
     The profile URL is always built as a clean web link from the username
     rather than reusing the export's href, which is sometimes a
     `.../_u/<user>` app-deeplink that doesn't open cleanly in a browser.
@@ -172,46 +184,113 @@ def _extract_accounts(blocks, stats: ParseStats | None = None) -> dict[str, dict
             continue
         if stats is not None and not _USERNAME_RE.match(username):
             stats.suspicious.append(username)
-        accounts[username] = {
+        accounts[username.casefold()] = {
             "href": f"https://instagram.com/{username}",
             "timestamp": timestamp,
+            "display": username,
         }
     return accounts
 
 
-def _load_following(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
-    path = folder / "following.json"
+class _ExportSource:
+    """The export's JSON files, read from a folder or straight out of a .zip.
+
+    Instagram delivers a zip whose files sit three levels down, under
+    connections/followers_and_following/. Rather than make that the user's
+    problem, this resolves a zip, an unzipped export root, or the folder
+    itself to the same interface.
+    """
+
+    def __init__(self, label: str, names: dict[str, object], read):
+        self.label = label       # what to name in an error message
+        self._names = names      # basename -> key the reader understands
+        self._read = read        # key -> bytes
+
+    def exists(self, name: str) -> bool:
+        return name in self._names
+
+    def glob(self, pattern: str) -> list[str]:
+        return sorted(n for n in self._names if fnmatch(n, pattern))
+
+    def read_json(self, name: str):
+        try:
+            return json.loads(self._read(self._names[name]).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as err:
+            raise ExportError(f"{name} in {self.label} is not readable JSON: {err}")
+
+
+def _zip_source(path: Path) -> _ExportSource:
+    archive = zipfile.ZipFile(path)
+    members = [m for m in archive.namelist() if not m.endswith("/")]
+    # Anchor on following.json so the export folder is found wherever it sits.
+    anchor_member = next(
+        (m for m in members if m.rsplit("/", 1)[-1] == "following.json"), None)
+    prefix = anchor_member.rsplit("/", 1)[0] + "/" if anchor_member and "/" in anchor_member else ""
+    names = {m[len(prefix):]: m for m in members
+             if m.startswith(prefix) and "/" not in m[len(prefix):]}
+    return _ExportSource(path.name, names, archive.read)
+
+
+def _dir_source(path: Path) -> _ExportSource:
+    folder = path
+    if not (folder / "following.json").exists():
+        # Point at the unzipped export root and we'll find the folder inside.
+        found = sorted(path.rglob("following.json"), key=lambda q: len(q.parts))
+        if found:
+            folder = found[0].parent
+    names = {q.name: q for q in folder.iterdir() if q.is_file()}
+    return _ExportSource(str(folder), names, lambda q: q.read_bytes())
+
+
+def open_export(path: Path) -> _ExportSource:
+    """Resolve a .zip, an export root, or the export folder to one interface."""
     if not path.exists():
-        sys.exit(f"Could not find {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
+        raise ExportError(f"No such file or folder: {path}")
+    if path.is_file():
+        if not zipfile.is_zipfile(path):
+            raise ExportError(f"{path} is not a folder or a .zip archive")
+        return _zip_source(path)
+    return _dir_source(path)
+
+
+def _as_source(folder) -> _ExportSource:
+    """Accept a path or an already-open source, so callers can pass either."""
+    return folder if isinstance(folder, _ExportSource) else open_export(Path(folder))
+
+
+def _load_following(source: _ExportSource, stats: ParseStats | None = None) -> dict[str, dict]:
+    if not source.exists("following.json"):
+        raise ExportError(f"Could not find following.json in {source.label}")
+    data = source.read_json("following.json")
     # following.json is a dict keyed by "relationships_following"
     blocks = data["relationships_following"] if isinstance(data, dict) else data
     return _extract_accounts(blocks, stats)
 
 
-def _load_followers(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
+def _load_followers(source: _ExportSource, stats: ParseStats | None = None) -> dict[str, dict]:
     # Instagram splits large follower lists: followers_1.json, followers_2.json, ...
-    files = sorted(folder.glob("followers_*.json"))
-    if not files and (folder / "followers.json").exists():
-        files = [folder / "followers.json"]  # older single-file exports
+    files = source.glob("followers_*.json")
+    if not files and source.exists("followers.json"):
+        files = ["followers.json"]  # older single-file exports
     if not files:
-        sys.exit(f"Could not find followers_*.json in {folder}")
+        raise ExportError(f"Could not find followers_*.json in {source.label}")
     accounts: dict[str, dict] = {}
-    for f in files:
-        data = json.loads(f.read_text(encoding="utf-8"))
+    for name in files:
+        data = source.read_json(name)
         # followers files are usually a top-level list
         blocks = data if isinstance(data, list) else data.get("relationships_followers", [])
         accounts.update(_extract_accounts(blocks, stats))
     return accounts
 
 
-def load_accounts(folder: Path,
+def load_accounts(folder,
                   stats: ParseStats | None = None) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Load (following, followers) from an export folder."""
-    return _load_following(folder, stats), _load_followers(folder, stats)
+    """Load (following, followers) from an export folder, root, or .zip."""
+    source = _as_source(folder)
+    return _load_following(source, stats), _load_followers(source, stats)
 
 
-def load_pending_requests(folder: Path, stats: ParseStats | None = None) -> dict[str, dict]:
+def load_pending_requests(folder, stats: ParseStats | None = None) -> dict[str, dict]:
     """Load follow requests you've SENT that are still pending.
 
     Reads pending_follow_requests.json (private accounts you asked to follow
@@ -219,10 +298,10 @@ def load_pending_requests(folder: Path, stats: ParseStats | None = None) -> dict
     pending requests won't have it — so a missing file returns {} rather than
     erroring.
     """
-    path = folder / "pending_follow_requests.json"
-    if not path.exists():
+    source = _as_source(folder)
+    if not source.exists("pending_follow_requests.json"):
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = source.read_json("pending_follow_requests.json")
     # pending_follow_requests.json is a dict keyed by
     # "relationships_follow_requests_sent"; tolerate a bare list too.
     blocks = data if isinstance(data, list) else data.get("relationships_follow_requests_sent", [])
@@ -249,6 +328,8 @@ def format_date(timestamp) -> str:
 
 def _to_record(username: str, info: dict) -> dict:
     timestamp = info.get("timestamp")
+    # Keys are casefolded; show the username the way Instagram spells it.
+    username = info.get("display") or username
     return {
         "username": username,
         "profile_url": info.get("href") or f"https://instagram.com/{username}",
@@ -549,8 +630,9 @@ def _write_list(records: list[dict], html_path: Path, csv_path: Path, txt_path: 
     return [html_path, csv_path, txt_path]
 
 
-def write_outputs(candidates: list[dict], pending: list[dict], out_dir: Path) -> list[Path]:
-    """Write the unfollow action list and, if any, the pending-requests list.
+def write_outputs(candidates: list[dict], pending: list[dict], out_dir: Path,
+                  fans: list[dict] | None = None) -> list[Path]:
+    """Write the unfollow action list, plus pending requests and fans if any.
 
     Files are written into out_dir (the directory the script is run from),
     not the export folder, so running the tool doesn't litter your export.
@@ -578,12 +660,31 @@ def write_outputs(candidates: list[dict], pending: list[dict], out_dir: Path) ->
                   "tick the box to mark it handled.",
             date_label="Requested on",
         )
+    if fans:
+        written += _write_list(
+            fans,
+            out_dir / "you_dont_follow_back.html",
+            out_dir / "you_dont_follow_back.csv",
+            out_dir / "you_dont_follow_back.txt",
+            title="You don't follow them back",
+            intro=f"{len(fans)} accounts that follow you but you don't follow "
+                  "back. Tick the box once you've decided about someone.",
+            date_label="Followed you on",
+        )
     return written
 
 
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+
+_EXPORT_HELP = (
+    "Request one from Instagram: Accounts Center > Your information and\n"
+    "permissions > Export your information, with scope 'Followers and\n"
+    "following' and format JSON. Then point this script at the .zip it\n"
+    "gives you, or at any folder inside it."
+)
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -593,12 +694,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Get your data: Instagram > Accounts Center > Your information and "
                "permissions > Export your information (scope: Followers and "
-               "following, format: JSON). Unzip it and point this script at "
-               "connections/followers_and_following/.",
+               "following, format: JSON). Point this script at the .zip it gives "
+               "you -- no need to unzip it first.",
     )
     parser.add_argument(
-        "folder", nargs="?", default=".", type=Path,
-        help="the connections/followers_and_following folder (default: current directory)",
+        "folder", nargs="?", default=".", type=Path, metavar="EXPORT",
+        help="the export .zip, the folder it unzips to, or the "
+             "connections/followers_and_following folder itself "
+             "(default: current directory)",
     )
     parser.add_argument(
         "--ignore", metavar="FILE", type=Path, default=None,
@@ -618,25 +721,31 @@ def main(argv: list[str] | None = None) -> None:
     out_dir = Path.cwd()
 
     stats = ParseStats()
-    following, followers = load_accounts(folder, stats)
+    try:
+        # Opened once and shared, so a zip isn't reopened per file.
+        source = open_export(folder)
+        following, followers = load_accounts(source, stats)
+        pending_accounts = load_pending_requests(source, stats)
+    except ExportError as err:
+        sys.exit(f"{err}\n\n{_EXPORT_HELP}")
     diff = compute_diff(following, followers)
     candidates = diff.not_following_back
-    pending_accounts = load_pending_requests(folder, stats)
     pending = _sorted_records(set(pending_accounts), pending_accounts)
 
     ignore_path = args.ignore or (out_dir / IGNORE_FILENAME)
     ignored = set() if args.no_ignore else load_ignore_list(ignore_path)
     candidates, hidden = apply_ignore_list(candidates, ignored)
     pending, pending_hidden = apply_ignore_list(pending, ignored)
+    fans, fans_hidden = apply_ignore_list(diff.fans_you_dont_follow_back, ignored)
 
     print(f"Following:             {len(following)}")
     print(f"Followers:             {len(followers)}")
     print(f"Mutuals:               {diff.mutuals}")
     print(f"Don't follow you back: {len(candidates)}")
-    print(f"You don't follow back: {len(diff.fans_you_dont_follow_back)}")
+    print(f"You don't follow back: {len(fans)}")
     print(f"Pending sent requests: {len(pending)}")
-    if hidden or pending_hidden:
-        print(f"Hidden by {ignore_path.name}:   {hidden + pending_hidden}")
+    if hidden or pending_hidden or fans_hidden:
+        print(f"Hidden by {ignore_path.name}:   {hidden + pending_hidden + fans_hidden}")
     print()
 
     print("=== Not following you back (candidates to unfollow) ===")
@@ -648,7 +757,7 @@ def main(argv: list[str] | None = None) -> None:
         for acc in pending:
             print(f"  {acc['username']:<30} requested {acc['followed_on']}  {acc['profile_url']}")
 
-    written = write_outputs(candidates, pending, out_dir)
+    written = write_outputs(candidates, pending, out_dir, fans)
     print(f"\nSaved {len(candidates)} unfollow candidates"
           + (f" and {len(pending)} pending requests" if pending else "")
           + ". Open the action list(s):")
