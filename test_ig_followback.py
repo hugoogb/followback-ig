@@ -498,6 +498,14 @@ class ExportSourceTests(unittest.TestCase):
             with self.assertRaises(ig.ExportError):
                 ig.open_export(junk)
 
+    def test_html_format_export_is_named_as_such(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d) / "connections" / "followers_and_following"
+            folder.mkdir(parents=True)
+            (folder / "following.html").write_text("<html></html>", encoding="utf-8")
+            with self.assertRaisesRegex(ig.ExportError, "Format: JSON"):
+                ig.load_accounts(Path(d))
+
     def test_missing_path_is_rejected_clearly(self):
         with self.assertRaises(ig.ExportError):
             ig.open_export(Path("/definitely/not/here"))
@@ -531,6 +539,157 @@ class FansOutputTests(unittest.TestCase):
                 for t in ("Not following you back", "You don't follow them back",
                           "Pending sent follow requests")}
         self.assertEqual(len(keys), 3)
+
+
+def _run_main(src, run, *extra):
+    """Run the CLI from `run` against export `src`; returns stdout."""
+    old_cwd, buf = os.getcwd(), io.StringIO()
+    try:
+        os.chdir(run)
+        with contextlib.redirect_stdout(buf):
+            ig.main([str(src), *extra])
+    finally:
+        os.chdir(old_cwd)
+    return buf.getvalue()
+
+
+def _export(folder, following, followers, **extra_files):
+    """Write a minimal export folder: usernames -> (timestamp)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "following.json").write_text(json.dumps({
+        "relationships_following": [_block(u, timestamp=t) for u, t in following.items()]}),
+        encoding="utf-8")
+    (folder / "followers_1.json").write_text(
+        json.dumps([_block(u, timestamp=t) for u, t in followers.items()]), encoding="utf-8")
+    for name, data in extra_files.items():
+        (folder / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+    return folder
+
+
+class KeepMarkTests(unittest.TestCase):
+    """Accounts followed on purpose need a way out of the list besides 'dead'."""
+
+    def test_row_offers_a_keep_marker(self):
+        records = [ig._to_record("brand", {"timestamp": 1})]
+        self.assertIn('class="keep"', ig._render_action_list("T", "i", records))
+
+    def test_prior_ignore_entries_are_carried_into_the_next_save(self):
+        # Hidden rows aren't in the table, so without this a second save would
+        # silently drop everything ignored in earlier runs.
+        out = ig._render_action_list("T", "i", [], prior=["old.dead", "brand"])
+        self.assertIn('const PRIOR = ["brand", "old.dead"];', out)
+
+    def test_prior_cannot_break_out_of_the_script_tag(self):
+        out = ig._render_action_list("T", "i", [], prior=["</script><b>"])
+        self.assertNotIn("</script><b>", out)
+
+    def test_main_passes_the_ignore_list_to_the_page(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d) / "src", {"ghost": 1, "dead.one": 2}, {})
+            run = Path(d) / "run"
+            run.mkdir()
+            (run / "ignore.txt").write_text("dead.one\n", encoding="utf-8")
+            _run_main(src, run)
+            self.assertIn('const PRIOR = ["dead.one"];',
+                          (run / "cleanup.html").read_text(encoding="utf-8"))
+
+    def test_a_username_that_looks_like_a_placeholder_is_left_alone(self):
+        records = [ig._to_record("__ROWS__", {"timestamp": 1})]
+        out = ig._render_action_list("T", "i", records, prior=["__TITLE__"])
+        self.assertIn('data-username="__ROWS__"', out)
+        self.assertIn('"__TITLE__"', out)
+
+
+class OptionalListsTests(unittest.TestCase):
+    CLOSE = {"relationships_close_friends": [_block("bestie", timestamp=1)]}
+    RECENT = {"relationships_unfollowed_users": [_block("old.crush", timestamp=7)]}
+
+    def test_missing_optional_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d), {"a": 1}, {"a": 1})
+            self.assertEqual(ig.load_optional_list(src, ig.CLOSE_FRIENDS_FILE), {})
+
+    def test_reads_close_friends_whatever_the_top_level_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d), {"a": 1}, {}, close_friends=self.CLOSE)
+            self.assertEqual(set(ig.load_optional_list(src, ig.CLOSE_FRIENDS_FILE)), {"bestie"})
+
+    def test_close_friends_who_dont_follow_back_are_tagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d) / "src", {"Bestie": 1, "rando": 2}, {},
+                          close_friends=self.CLOSE)
+            run = Path(d) / "run"
+            run.mkdir()
+            out = _run_main(src, run)
+            page = (run / "cleanup.html").read_text(encoding="utf-8")
+            self.assertEqual(page.count('class="tag" title='), 1)
+            self.assertIn("1 on your Close Friends list", out)
+
+    def test_recently_unfollowed_gets_its_own_read_only_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d) / "src", {"a": 1}, {"a": 1},
+                          recently_unfollowed_profiles=self.RECENT)
+            run = Path(d) / "run"
+            run.mkdir()
+            _run_main(src, run)
+            self.assertEqual((run / "recently_unfollowed.txt").read_text(), "old.crush")
+            self.assertIn('<body class="plain">',
+                          (run / "recently_unfollowed.html").read_text(encoding="utf-8"))
+
+
+class CompareExportsTests(unittest.TestCase):
+    def test_compare_exports_reports_all_four_directions(self):
+        acc = lambda *names: {n: {"timestamp": 1} for n in names}
+        changes = ig.compare_exports(
+            old_following=acc("kept", "dropped"), old_followers=acc("loyal", "leaver"),
+            new_following=acc("kept", "added"), new_followers=acc("loyal", "newbie"))
+        names = lambda recs: [r["username"] for r in recs]
+        self.assertEqual(names(changes.lost_followers), ["leaver"])
+        self.assertEqual(names(changes.new_followers), ["newbie"])
+        self.assertEqual(names(changes.you_unfollowed), ["dropped"])
+        self.assertEqual(names(changes.you_followed), ["added"])
+
+    def test_since_writes_change_lists(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = _export(Path(d) / "old", {"a": 1}, {"a": 1, "Leaver": 2})
+            new = _export(Path(d) / "new", {"a": 1}, {"a": 1, "newbie": 9})
+            run = Path(d) / "run"
+            run.mkdir()
+            out = _run_main(new, run, "--since", str(old))
+            self.assertEqual((run / "unfollowed_you.txt").read_text(), "Leaver")
+            self.assertEqual((run / "new_followers.txt").read_text(), "newbie")
+            self.assertIn("Stopped following you: 1", out)
+            self.assertNotIn("Did you swap them?", out)
+
+    def test_swapped_exports_are_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = _export(Path(d) / "old", {"a": 1}, {"a": 1})
+            new = _export(Path(d) / "new", {"a": 1}, {"a": 1, "later": 99})
+            run = Path(d) / "run"
+            run.mkdir()
+            self.assertIn("Did you swap them?", _run_main(old, run, "--since", str(new)))
+
+    def test_change_lists_are_written_even_when_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            same = _export(Path(d) / "x", {"a": 1}, {"a": 1})
+            run = Path(d) / "run"
+            run.mkdir()
+            _run_main(same, run, "--since", str(same))
+            self.assertEqual((run / "unfollowed_you.txt").read_text(), "")
+
+
+class TerminalOutputTests(unittest.TestCase):
+    def test_long_lists_are_truncated_unless_print_all(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = _export(Path(d) / "src", {f"user{i:02}": i + 1 for i in range(30)}, {})
+            run = Path(d) / "run"
+            run.mkdir()
+            short = _run_main(src, run)
+            self.assertIn("... and 10 more", short)
+            self.assertNotIn("user29", short)
+            self.assertIn("user29", _run_main(src, run, "--print-all"))
+            # The files always hold everything.
+            self.assertEqual(len((run / "not_following_back.txt").read_text().split()), 30)
 
 
 if __name__ == "__main__":
