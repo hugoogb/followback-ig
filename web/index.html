@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The page cannot make network requests of any kind: no fetch, no images, no
+     fonts, no form posts. Your export is read and processed only in this tab. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="description" content="See who doesn't follow you back on Instagram, from your own data export. Runs entirely in your browser: no login, nothing uploaded.">
+<title>Followback</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1c1c1e; --muted: #6b6b70; --line: #e6e6ea; --panel: #f6f6f8;
+    --accent: #0a66c2; --accent-fg: #ffffff; --ok-bg: #dcfce7; --ok-fg: #166534;
+    --warn-bg: #fff7ed; --warn-line: #d97706; --keep-bg: #eff6ff; --keep-line: #2563eb;
+    --err-bg: #fef2f2; --err-fg: #991b1b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121214; --fg: #ececef; --muted: #9a9aa2; --line: #2a2a2f; --panel: #1b1b1f;
+      --accent: #5aa2ff; --accent-fg: #0b1220; --ok-bg: #12351f; --ok-fg: #86efac;
+      --warn-bg: #2a1d0e; --warn-line: #f59e0b; --keep-bg: #0f1d33; --keep-line: #60a5fa;
+      --err-bg: #2d1214; --err-fg: #fca5a5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121214; --fg: #ececef; --muted: #9a9aa2; --line: #2a2a2f; --panel: #1b1b1f;
+    --accent: #5aa2ff; --accent-fg: #0b1220; --ok-bg: #12351f; --ok-fg: #86efac;
+    --warn-bg: #2a1d0e; --warn-line: #f59e0b; --keep-bg: #0f1d33; --keep-line: #60a5fa;
+    --err-bg: #2d1214; --err-fg: #fca5a5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 1.5rem 16px 4rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.1rem; margin: 1.5rem 0 .5rem; }
+  p { margin: .5rem 0; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .small { font-size: .875rem; }
+  button, .btn { font: inherit; font-size: .9rem; padding: .4rem .75rem; border-radius: 8px;
+                 border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+                 cursor: pointer; display: inline-block; text-decoration: none; }
+  button:hover, .btn:hover { background: var(--panel); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .privacy { display: flex; gap: .5rem; align-items: flex-start; background: var(--ok-bg); color: var(--ok-fg);
+             border-radius: 10px; padding: .6rem .8rem; font-size: .9rem; margin: 1rem 0; }
+  details { background: var(--panel); border-radius: 10px; padding: .6rem .9rem; margin: 1rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  details ol { margin: .5rem 0 .25rem; padding-left: 1.3rem; }
+  details li { margin: .25rem 0; }
+
+  #drop { border: 2px dashed var(--line); border-radius: 14px; padding: 2rem 1rem; text-align: center;
+          transition: border-color .15s, background .15s; }
+  #drop.over { border-color: var(--accent); background: var(--panel); }
+  #drop .big { font-size: 1.1rem; font-weight: 600; margin-bottom: .75rem; }
+  #drop .alt { margin-top: .75rem; }
+  input[type=file] { display: none; }
+  .linkish { background: none; border: none; color: var(--accent); padding: 0; font-size: inherit; text-decoration: underline; }
+  .linkish:hover { background: none; }
+
+  .msg { border-radius: 10px; padding: .6rem .8rem; margin: 1rem 0; font-size: .95rem; }
+  .msg.err { background: var(--err-bg); color: var(--err-fg); }
+  .msg.warn { background: var(--warn-bg); border-left: 3px solid var(--warn-line); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .5rem; margin: 1rem 0; }
+  .stat { background: var(--panel); border-radius: 10px; padding: .6rem .8rem; }
+  .stat b { display: block; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: .85rem; }
+
+  .tabs { display: flex; gap: .25rem; overflow-x: auto; border-bottom: 1px solid var(--line); margin-top: 1.25rem;
+          scrollbar-width: thin; }
+  .tab { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; white-space: nowrap;
+         padding: .5rem .7rem; color: var(--muted); }
+  .tab:hover { background: none; color: var(--fg); }
+  .tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab .n { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; margin-left: .25rem; }
+
+  .bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .75rem 0; }
+  .bar input[type=search] { flex: 1 1 12rem; min-width: 0; padding: .45rem .6rem; font: inherit; font-size: .95rem;
+                            border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  .bar label { font-size: .875rem; color: var(--muted); display: flex; gap: .3rem; align-items: center; }
+  .count { color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
+
+  .sorts { display: flex; gap: .5rem; font-size: .85rem; color: var(--muted); align-items: center; margin-bottom: .25rem; }
+  .sorts button { font-size: .8rem; padding: .2rem .5rem; }
+  .sorts button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
+
+  ul.rows { list-style: none; padding: 0; margin: 0; }
+  .row { display: flex; align-items: center; gap: .6rem; padding: .55rem .25rem; border-bottom: 1px solid var(--line); }
+  .row input[type=checkbox] { width: 1.15rem; height: 1.15rem; flex: none; accent-color: var(--accent); }
+  .who { flex: 1 1 auto; min-width: 0; }
+  .who a.u { font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+  .who a.u:hover { text-decoration: underline; }
+  .who .sub { font-size: .8rem; color: var(--muted); }
+  .who .sub a { color: var(--muted); }
+  .tag { font-size: .7rem; background: var(--ok-bg); color: var(--ok-fg); border-radius: 4px; padding: .05rem .35rem;
+         margin-left: .35rem; white-space: nowrap; vertical-align: middle; }
+  .acts { display: flex; gap: .3rem; flex: none; }
+  .acts button { font-size: .78rem; padding: .2rem .45rem; }
+  .row.done .who { opacity: .45; text-decoration: line-through; }
+  .row.gone { background: var(--warn-bg); }
+  .row.gone .u { text-decoration: line-through wavy var(--warn-line); }
+  .row.gone .dead { border-color: var(--warn-line); }
+  .row.keep, .row.ignored { background: var(--keep-bg); }
+  .row.keep .keep, .row.ignored .keep { border-color: var(--keep-line); }
+  .plain .dead, .plain .keep { display: none; }
+  .empty { padding: 1.5rem .25rem; color: var(--muted); }
+  @media (max-width: 480px) {
+    .row { flex-wrap: wrap; }
+    .acts { width: 100%; padding-left: 1.75rem; }
+  }
+
+  .tools { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+  .note { font-size: .85rem; color: var(--muted); margin-top: 1rem; }
+  footer { margin-top: 2.5rem; font-size: .8rem; color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Followback</h1>
+  <p class="muted">See who doesn't follow you back on Instagram, from your own data export.</p>
+
+  <div class="privacy" role="note">
+    <span aria-hidden="true">🔒</span>
+    <span>Runs entirely in this browser tab. No login, nothing is uploaded, and the page is
+    locked so it <em>cannot</em> make network requests. You can save this page and use it offline.</span>
+  </div>
+
+  <section id="start">
+    <details id="howto">
+      <summary>First: get your data from Instagram (takes a few minutes)</summary>
+      <ol>
+        <li>In Instagram, open <b>Accounts Center → Your information and permissions → Export your information</b>.</li>
+        <li>Create an export <b>to your device</b>. Under <b>Customize information</b> choose only
+            <b>Followers and following</b>.</li>
+        <li>Set <b>Format: JSON</b> (not HTML) and any date range — <b>All time</b> is best.</li>
+        <li>Instagram emails you when it's ready. Download the <code>.zip</code> and drop it below.
+            There's no need to unzip it.</li>
+      </ol>
+    </details>
+
+    <div id="drop">
+      <div class="big">Drop your Instagram export here</div>
+      <button class="primary" id="pick" type="button">Choose the .zip</button>
+      <div class="alt small muted">
+        Unzipped already (Safari does this)? <button class="linkish" id="pickdir" type="button">Choose the folder</button>
+        or select its <code>.json</code> files.
+      </div>
+    </div>
+    <input type="file" id="file" accept=".zip,.json,application/zip,application/json" multiple>
+    <input type="file" id="dir" webkitdirectory multiple>
+  </section>
+
+  <div id="error" class="msg err" role="alert" hidden></div>
+
+  <section id="results" hidden>
+    <div class="stats" id="stats"></div>
+    <div id="warn" class="msg warn" hidden></div>
+
+    <div class="tools">
+      <button id="compare" type="button">Compare with an older export…</button>
+      <button id="restart" type="button">Load another export</button>
+    </div>
+    <input type="file" id="oldfile" accept=".zip,.json,application/zip,application/json" multiple>
+
+    <div class="tabs" role="tablist" id="tabs"></div>
+
+    <div id="intro" class="small muted" style="margin-top:.75rem"></div>
+    <div class="bar">
+      <input type="search" id="q" placeholder="Filter usernames…" autocomplete="off" aria-label="Filter usernames">
+      <label id="showHiddenWrap"><input type="checkbox" id="showHidden"><span>show hidden (<span id="hiddenN">0</span>)</span></label>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="sorts">Sort:
+      <button type="button" data-sort="date" aria-pressed="true">date</button>
+      <button type="button" data-sort="name" aria-pressed="false">name</button>
+    </div>
+    <ul class="rows" id="rows"></ul>
+
+    <div class="tools">
+      <button id="csv" type="button">Download CSV</button>
+      <button id="txt" type="button">Download usernames</button>
+      <button id="saveIgnore" type="button">Save ignore.txt</button>
+      <button id="loadIgnore" type="button">Import ignore.txt</button>
+      <button id="clearMarks" type="button">Clear marks</button>
+    </div>
+    <input type="file" id="ignorefile" accept=".txt,text/plain">
+
+    <p class="note">
+      Tap a username to open the profile and unfollow in Instagram, then tick the box.
+      <b>find</b> searches for an account that was renamed. <b>copy</b> copies the username.
+      Mark <b>dead</b> for profiles that say <em>“Sorry, this page isn't available”</em> (usually
+      deleted or banned before the export was made), and <b>keep</b> for accounts you follow on purpose
+      (brands, artists, news). Dead and kept accounts are hidden here and in your next export.
+      Marks are saved in this browser only.
+    </p>
+  </section>
+
+  <footer>
+    Followback is open source and also available as a command-line tool.
+    Automated unfollowing is deliberately not included: it breaks Instagram's Terms of Service and can get your account restricted.
+  </footer>
+</main>
+
+<script>
+'use strict';
+
+/* ------------------------------------------------------------------------ *
+ * Zip reading (no libraries): central directory + DecompressionStream.
+ * Only the entries we need are read, using File.slice, so a large archive
+ * isn't loaded into memory.
+ * ------------------------------------------------------------------------ */
+
+async function readBytes(file, start, end) {
+  return new Uint8Array(await file.slice(start, end).arrayBuffer());
+}
+
+async function zipEntries(file) {
+  const tailLen = Math.min(file.size, 65557);
+  const tail = await readBytes(file, file.size - tailLen, file.size);
+  const dv = new DataView(tail.buffer);
+  let eocd = -1;
+  for (let i = tail.length - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new UserError("That file isn't a readable .zip archive.");
+  let count = dv.getUint16(eocd + 10, true);
+  let cdSize = dv.getUint32(eocd + 12, true);
+  let cdOffset = dv.getUint32(eocd + 16, true);
+  // Zip64: the real values live in a separate record pointed to by a locator.
+  if (cdOffset === 0xffffffff || count === 0xffff) {
+    const loc = eocd - 20;
+    if (loc >= 0 && dv.getUint32(loc, true) === 0x07064b50) {
+      const recOff = Number(dv.getBigUint64(loc + 8, true));
+      const rec = new DataView((await readBytes(file, recOff, recOff + 56)).buffer);
+      count = Number(rec.getBigUint64(32, true));
+      cdSize = Number(rec.getBigUint64(40, true));
+      cdOffset = Number(rec.getBigUint64(48, true));
+    }
+  }
+  const cd = await readBytes(file, cdOffset, cdOffset + cdSize);
+  const cv = new DataView(cd.buffer);
+  const dec = new TextDecoder();
+  const entries = [];
+  let p = 0;
+  for (let n = 0; n < count && p + 46 <= cd.length; n++) {
+    if (cv.getUint32(p, true) !== 0x02014b50) break;
+    const method = cv.getUint16(p + 10, true);
+    let csize = cv.getUint32(p + 20, true);
+    let usize = cv.getUint32(p + 24, true);
+    const nlen = cv.getUint16(p + 28, true), xlen = cv.getUint16(p + 30, true), clen = cv.getUint16(p + 32, true);
+    let local = cv.getUint32(p + 42, true);
+    const name = dec.decode(cd.subarray(p + 46, p + 46 + nlen));
+    // Zip64 extra field: the 64-bit values appear only for fields that overflowed.
+    let x = p + 46 + nlen;
+    const xend = x + xlen;
+    while (x + 4 <= xend) {
+      const id = cv.getUint16(x, true), size = cv.getUint16(x + 2, true);
+      if (id === 0x0001) {
+        let q = x + 4;
+        if (usize === 0xffffffff) { usize = Number(cv.getBigUint64(q, true)); q += 8; }
+        if (csize === 0xffffffff) { csize = Number(cv.getBigUint64(q, true)); q += 8; }
+        if (local === 0xffffffff) { local = Number(cv.getBigUint64(q, true)); }
+      }
+      x += 4 + size;
+    }
+    if (!name.endsWith('/')) entries.push({ name, method, csize, local });
+    p = xend + clen;
+  }
+  return entries;
+}
+
+async function zipRead(file, entry) {
+  const head = new DataView((await readBytes(file, entry.local, entry.local + 30)).buffer);
+  if (head.getUint32(0, true) !== 0x04034b50) throw new UserError('The .zip archive looks damaged.');
+  const start = entry.local + 30 + head.getUint16(26, true) + head.getUint16(28, true);
+  const blob = file.slice(start, start + entry.csize);
+  if (entry.method === 0) return new Uint8Array(await blob.arrayBuffer());
+  if (entry.method !== 8) throw new UserError('The .zip uses a compression method this page can\'t read. Try unzipping it and choosing the folder.');
+  if (typeof DecompressionStream === 'undefined') {
+    throw new UserError('This browser is too old to unzip files. Update it, or unzip the export and choose the folder.');
+  }
+  const stream = blob.stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/* ------------------------------------------------------------------------ *
+ * Export sources: a zip, a folder, or loose .json files all resolve to
+ * { label, names: Map(basename -> async () => text) } for the export folder.
+ * ------------------------------------------------------------------------ */
+
+class UserError extends Error {}
+const ANCHORS = ['following.json', 'following.html'];
+const base = path => path.split('/').pop();
+const dir = path => path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+
+function pickFolder(paths) {
+  // Anchor on following.json so the folder is found wherever it sits.
+  for (const anchor of ANCHORS) {
+    const hits = paths.filter(p => base(p) === anchor).sort((a, b) => a.split('/').length - b.split('/').length);
+    if (hits.length) return dir(hits[0]);
+  }
+  return null;
+}
+
+async function openSource(files) {
+  files = [...files];
+  if (!files.length) throw new UserError('No file chosen.');
+  const decoder = new TextDecoder();
+  const zip = files.find(f => /\.zip$/i.test(f.name)) ||
+              (files.length === 1 && !/\.json$/i.test(files[0].name) ? files[0] : null);
+  if (zip) {
+    const entries = await zipEntries(zip);
+    const folder = pickFolder(entries.map(e => e.name));
+    const names = new Map();
+    for (const e of entries) {
+      if (folder !== null && dir(e.name) !== folder) continue;
+      if (folder === null && e.name.includes('/')) continue;
+      names.set(base(e.name), async () => decoder.decode(await zipRead(zip, e)));
+    }
+    return { label: zip.name, names };
+  }
+  const path = f => f.webkitRelativePath || f._path || f.name;
+  const folder = pickFolder(files.map(path));
+  const names = new Map();
+  for (const f of files) {
+    if (folder !== null && dir(path(f)) !== folder) continue;
+    names.set(f.name, () => f.text());
+  }
+  return { label: folder ? folder.replace(/\/$/, '') : 'the selected files', names };
+}
+
+async function readJson(source, name) {
+  try { return JSON.parse(await source.names.get(name)()); }
+  catch (err) {
+    if (err instanceof UserError) throw err;
+    throw new UserError(`${name} in ${source.label} isn't readable JSON (${err.message}).`);
+  }
+}
+
+/* ------------------------------------------------------------------------ *
+ * Parsing -- a port of ig_followback.py; keep the two in step.
+ * ------------------------------------------------------------------------ */
+
+const USERNAME_RE = /^[A-Za-z0-9._]{1,30}$/;
+const HREF_RE = /instagram\.com\/(?:_u\/)?([A-Za-z0-9._]{1,30})\/?$/;
+const USERNAME_LABELS = new Set([
+  'username', 'nombre de usuario', "nom d'utilisateur", 'nome utente',
+  'benutzername', 'nome de usuário', 'gebruikersnaam', 'användarnamn',
+  'kullanıcı adı', 'nazwa użytkownika', 'имя пользователя', 'ユーザーネーム',
+  '사용자 이름', '用户名',
+]);
+const str = v => (typeof v === 'string' ? v : '').trim();
+
+function labelValueCandidates(pairs) {
+  const labelled = [], shaped = [];
+  for (const pair of pairs) {
+    if (!pair || typeof pair !== 'object') continue;
+    const label = str(pair.label).toLowerCase(), value = str(pair.value);
+    if (!value) continue;
+    if (USERNAME_LABELS.has(label)) labelled.push(value);
+    else if (USERNAME_RE.test(value)) shaped.push(value);
+  }
+  return [...shaped.reverse(), ...labelled];
+}
+
+function usernameCandidates(block) {
+  const hrefs = [], values = [];
+  for (const item of Array.isArray(block.string_list_data) ? block.string_list_data : []) {
+    if (!item || typeof item !== 'object') continue;
+    const m = HREF_RE.exec(str(item.href));
+    if (m) hrefs.push(m[1]);
+    const value = str(item.value);
+    if (value) values.push(value);
+  }
+  const out = [...hrefs, ...values,
+               ...labelValueCandidates(Array.isArray(block.label_values) ? block.label_values : []).reverse()];
+  const title = str(block.title);
+  if (title) out.push(title);
+  return out;
+}
+
+function extractAccounts(blocks, stats) {
+  const accounts = new Map();
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (!block || typeof block !== 'object') { if (stats) stats.skipped++; continue; }
+    let ts = block.timestamp;
+    for (const item of Array.isArray(block.string_list_data) ? block.string_list_data : []) {
+      if (item && item.timestamp) ts = item.timestamp;
+    }
+    const cands = usernameCandidates(block);
+    const username = cands.find(c => USERNAME_RE.test(c)) || cands[0] || '';
+    if (!username) { if (stats) stats.skipped++; continue; }
+    if (stats && !USERNAME_RE.test(username)) stats.suspicious.push(username);
+    accounts.set(username.toLowerCase(), { name: username, ts: typeof ts === 'number' ? ts : null });
+  }
+  return accounts;
+}
+
+function blocksFrom(data, key) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === 'object') {
+    if (key && Array.isArray(data[key])) return data[key];
+    for (const v of Object.values(data)) if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+
+async function loadExport(files, stats) {
+  const source = await openSource(files);
+  const has = n => source.names.has(n);
+  if (!has('following.json')) {
+    if (has('following.html')) {
+      throw new UserError('This export is in HTML format, which can\'t be read reliably. ' +
+                          'Request a new export from Instagram and choose Format: JSON.');
+    }
+    throw new UserError(`Couldn't find following.json in ${source.label}. Make sure you chose the ` +
+                        'export Instagram emailed you, with "Followers and following" included and Format: JSON.');
+  }
+  const following = extractAccounts(blocksFrom(await readJson(source, 'following.json'), 'relationships_following'), stats);
+  let followerFiles = [...source.names.keys()].filter(n => /^followers_\d+\.json$/.test(n)).sort();
+  if (!followerFiles.length && has('followers.json')) followerFiles = ['followers.json'];
+  if (!followerFiles.length) throw new UserError(`Couldn't find your followers (followers_1.json) in ${source.label}.`);
+  const followers = new Map();
+  for (const n of followerFiles) {
+    for (const [k, v] of extractAccounts(blocksFrom(await readJson(source, n), 'relationships_followers'), stats)) followers.set(k, v);
+  }
+  const optional = async (n, key, s) => has(n) ? extractAccounts(blocksFrom(await readJson(source, n), key), s) : new Map();
+  return {
+    label: source.label, following, followers,
+    pending: await optional('pending_follow_requests.json', 'relationships_follow_requests_sent', stats),
+    closeFriends: await optional('close_friends.json'),
+    recent: await optional('recently_unfollowed_profiles.json'),
+    blocked: await optional('blocked_profiles.json'),
+    restricted: await optional('restricted_profiles.json'),
+  };
+}
+
+/* ------------------------------------------------------------------------ *
+ * Diffing
+ * ------------------------------------------------------------------------ */
+
+const fmtDate = ts => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : 'unknown';
+const minus = (a, b) => [...a.keys()].filter(k => !b.has(k));
+function records(keys, from) {
+  return keys.map(k => ({ key: k, name: from.get(k).name, ts: from.get(k).ts }))
+    .sort((a, b) => (!a.ts - !b.ts) || ((a.ts || 0) - (b.ts || 0)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+const latest = (...maps) => Math.max(0, ...maps.flatMap(m => [...m.values()].map(v => v.ts || 0)));
+
+/* ------------------------------------------------------------------------ *
+ * Marks: dead/keep/ignored are global (they hide an account everywhere);
+ * "done" ticks are per list. Saved in this browser's localStorage only.
+ * ------------------------------------------------------------------------ */
+
+const STORE = 'followback:v1';
+let marks = {}, done = {};
+try { const s = JSON.parse(localStorage.getItem(STORE)) || {}; marks = s.marks || {}; done = s.done || {}; } catch (e) {}
+const persist = () => { try { localStorage.setItem(STORE, JSON.stringify({ marks, done })); } catch (e) {} };
+
+/* ------------------------------------------------------------------------ *
+ * UI
+ * ------------------------------------------------------------------------ */
+
+const $ = s => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    // ARIA as attributes: the reflected properties aren't in every browser.
+    if (k.startsWith('aria')) n.setAttribute('aria-' + k.slice(4).toLowerCase(), v);
+    else n[k] = v;
+  }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+};
+const profileUrl = name => 'https://instagram.com/' + encodeURIComponent(name);
+const searchUrl = name => 'https://www.instagram.com/explore/search/keyword/?q=' + encodeURIComponent(name);
+
+let current = null, older = null, lists = [], active = 'nfb', sortBy = 'date';
+
+const LISTS = [
+  { id: 'nfb', title: "Don't follow you back", date: 'Followed on', triage: true,
+    intro: n => `${n} accounts you follow who don't follow you back. Open one, unfollow in Instagram, tick the box.` },
+  { id: 'fans', title: "You don't follow back", date: 'Followed you on', triage: true,
+    intro: n => `${n} accounts that follow you but you don't follow back.` },
+  { id: 'pending', title: 'Pending requests', date: 'Requested on', triage: true,
+    intro: n => `${n} follow requests you've sent to private accounts that haven't been accepted. Open a profile to cancel one.` },
+  { id: 'lost', title: 'Stopped following you', date: 'Followed you on', triage: false,
+    intro: n => `${n} accounts followed you in the older export and don't now. Some may have deactivated or deleted their account instead — an export can't tell the two apart.` },
+  { id: 'gained', title: 'New followers', date: 'Followed you on', triage: false,
+    intro: n => `${n} accounts follow you now that didn't in the older export.` },
+  { id: 'recent', title: 'Recently unfollowed', date: 'Unfollowed on', triage: false,
+    intro: n => `${n} accounts Instagram lists as recently unfollowed by you — the cleanup you've already done.` },
+];
+
+function build() {
+  const d = current;
+  const recs = {
+    nfb: records(minus(d.following, d.followers), d.following),
+    fans: records(minus(d.followers, d.following), d.followers),
+    pending: records([...d.pending.keys()], d.pending),
+    recent: records([...d.recent.keys()], d.recent),
+  };
+  if (older) {
+    recs.lost = records(minus(older.followers, d.followers), older.followers);
+    recs.gained = records(minus(d.followers, older.followers), d.followers);
+  }
+  for (const list of Object.values(recs)) for (const r of list) r.cf = d.closeFriends.has(r.key);
+  lists = LISTS.filter(l => recs[l.id] && (recs[l.id].length || l.id === 'nfb' || l.id === 'lost' || l.id === 'gained'))
+               .map(l => ({ ...l, recs: recs[l.id] }));
+  if (!lists.some(l => l.id === active)) active = 'nfb';
+
+  const mutuals = [...d.following.keys()].filter(k => d.followers.has(k)).length;
+  const cfBack = recs.nfb.filter(r => r.cf).length;
+  const stats = [
+    [d.following.size, 'following'], [d.followers.size, 'followers'], [mutuals, 'mutuals'],
+    [recs.nfb.length, "don't follow you back"],
+  ];
+  if (cfBack) stats.push([cfBack, "close friends who don't follow back"]);
+  if (older) stats.push([recs.lost.length, 'stopped following you'], [recs.gained.length, 'new followers']);
+  $('#stats').replaceChildren(...stats.map(([n, label]) => el('div', { className: 'stat' }, el('b', { textContent: n.toLocaleString() }), el('span', { textContent: label }))));
+
+  const warns = [];
+  if (d.stats.suspicious.length || d.stats.skipped) {
+    const s = d.stats.suspicious;
+    if (d.stats.skipped) warns.push(`${d.stats.skipped} entries had no readable username and were left out.`);
+    if (s.length) warns.push(`${s.length} entries didn't look like a username, so their links won't open: ${s.slice(0, 5).join(', ')}${s.length > 5 ? '…' : ''}`);
+  }
+  if (older && latest(older.following, older.followers) > latest(d.following, d.followers)) {
+    warns.push('The “older” export has more recent follows than the current one — they look swapped.');
+  }
+  $('#warn').hidden = !warns.length;
+  $('#warn').replaceChildren(...warns.map(w => el('div', { textContent: w })));
+  if (older && warns.some(w => w.includes('swapped'))) {
+    $('#warn').append(el('button', { type: 'button', textContent: 'Swap them', style: 'margin-top:.5rem',
+      onclick: () => { [current, older] = [older, current]; build(); } }));
+  }
+  $('#compare').textContent = older ? `Comparing with ${older.label} — change` : 'Compare with an older export…';
+  renderTabs(); render();
+}
+
+function renderTabs() {
+  $('#tabs').replaceChildren(...lists.map(l => el('button', {
+    className: 'tab', type: 'button', role: 'tab', ariaSelected: String(l.id === active),
+    onclick: () => { active = l.id; $('#q').value = ''; renderTabs(); render(); },
+  }, l.title, el('span', { className: 'n', textContent: visible(l).length }))));
+}
+
+const isHidden = (l, r) => l.triage && marks[r.key];
+const visible = l => l.recs.filter(r => !isHidden(l, r));
+
+function render() {
+  const l = lists.find(x => x.id === active);
+  const q = $('#q').value.trim().toLowerCase();
+  const hiddenN = l.recs.length - visible(l).length;
+  // With nothing hidden the toggle disappears, so it mustn't stay switched on.
+  if (!hiddenN) $('#showHidden').checked = false;
+  const showHidden = $('#showHidden').checked;
+  $('#hiddenN').textContent = hiddenN;
+  $('#showHiddenWrap').hidden = !l.triage || !hiddenN;
+  $('#saveIgnore').hidden = $('#loadIgnore').hidden = !l.triage;
+  $('#intro').textContent = l.intro(visible(l).length);
+  $('#rows').className = 'rows' + (l.triage ? '' : ' plain');
+
+  let rows = l.recs.filter(r => (showHidden || !isHidden(l, r)) && (!q || r.key.includes(q)));
+  if (sortBy === 'name') rows = [...rows].sort((a, b) => a.key < b.key ? -1 : 1);
+  const ticks = done[l.id] || {};
+  const items = rows.map(r => {
+    const mark = l.triage ? marks[r.key] && marks[r.key].m : null;
+    const li = el('li', { className: 'row' + (ticks[r.key] ? ' done' : '') + (mark ? ' ' + mark : '') });
+    li.dataset.key = r.key;
+    const box = el('input', { type: 'checkbox', checked: !!ticks[r.key], ariaLabel: 'Handled ' + r.name });
+    box.addEventListener('change', () => {
+      done[l.id] = done[l.id] || {};
+      if (box.checked) done[l.id][r.key] = 1; else delete done[l.id][r.key];
+      persist(); li.classList.toggle('done', box.checked); counter();
+    });
+    const who = el('div', { className: 'who' },
+      el('a', { className: 'u', href: profileUrl(r.name), target: '_blank', rel: 'noopener noreferrer', textContent: r.name }),
+      r.cf ? el('span', { className: 'tag', title: 'On your Close Friends list', textContent: 'close friend' }) : null,
+      mark === 'ignored' ? el('span', { className: 'tag', textContent: 'from ignore.txt' }) : null,
+      el('div', { className: 'sub' }, `${l.date} ${fmtDate(r.ts)} · `,
+        el('a', { href: searchUrl(r.name), target: '_blank', rel: 'noopener noreferrer', textContent: 'find' })));
+    // An imported ignore.txt entry counts as "keep" for toggling it off.
+    const is = (m, kind) => m === kind || (kind === 'keep' && m === 'ignored');
+    const markBtn = (kind, label, title) => el('button', { type: 'button', className: label, textContent: label, title,
+      ariaPressed: String(is(mark, kind)),
+      onclick: () => {
+        if (marks[r.key] && is(marks[r.key].m, kind)) delete marks[r.key];
+        else marks[r.key] = { m: kind, name: r.name };
+        persist(); renderTabs(); render();
+      } });
+    const copy = el('button', { type: 'button', className: 'copy', textContent: 'copy', title: 'Copy the username',
+      onclick: async () => { copy.textContent = (await copyText(r.name)) ? 'copied' : 'failed'; setTimeout(() => { copy.textContent = 'copy'; }, 1200); } });
+    li.append(box, who, el('div', { className: 'acts' }, copy,
+      markBtn('gone', 'dead', 'Deleted, banned or renamed: hide it'), markBtn('keep', 'keep', 'Following on purpose: hide it')));
+    return li;
+  });
+  $('#rows').replaceChildren(...(items.length ? items : [el('li', { className: 'empty',
+    textContent: q ? 'No usernames match.' : l.recs.length ? 'Everything here is hidden by your marks.' : 'Nothing here. 🎉' })]));
+  counter();
+}
+
+function counter() {
+  const l = lists.find(x => x.id === active);
+  const vis = visible(l), ticks = done[l.id] || {};
+  const n = vis.filter(r => ticks[r.key]).length;
+  $('#count').textContent = `${n} of ${vis.length} handled`;
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+  try {
+    const ta = el('textarea', { value: text, readOnly: true });
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.append(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch (e) { return false; }
+}
+
+function download(name, text, type = 'text/plain') {
+  const a = el('a', { href: URL.createObjectURL(new Blob([text], { type: type + ';charset=utf-8' })), download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+const slug = l => l.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+const csvCell = v => /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+
+function showError(err) {
+  $('#error').hidden = false;
+  $('#error').textContent = err instanceof UserError ? err.message : 'Something went wrong reading that export: ' + err.message;
+  if (!(err instanceof UserError)) console.error(err);
+}
+
+async function load(files, asOlder = false) {
+  $('#error').hidden = true;
+  const stats = { skipped: 0, suspicious: [] };
+  try {
+    const data = await loadExport(files, stats);
+    data.stats = stats;
+    if (asOlder) older = data; else { current = data; older = null; }
+    $('#start').hidden = true; $('#results').hidden = false;
+    build();
+  } catch (err) { showError(err); }
+}
+
+// Folder drops: walk the directory entries so a Safari-unzipped export works.
+async function filesFromDrop(dt) {
+  const items = [...(dt.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!items.length || items.every(e => e.isFile)) return [...dt.files];
+  const out = [];
+  const walk = async entry => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      f._path = entry.fullPath.replace(/^\//, '');
+      out.push(f);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const e of batch) await walk(e);
+      } while (batch.length);
+    }
+  };
+  for (const e of items) await walk(e);
+  return out;
+}
+
+const drop = $('#drop');
+['dragenter', 'dragover'].forEach(t => document.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) drop.classList.remove('over'); });
+document.addEventListener('drop', async e => {
+  e.preventDefault(); drop.classList.remove('over');
+  load(await filesFromDrop(e.dataTransfer));
+});
+
+$('#pick').onclick = () => $('#file').click();
+$('#pickdir').onclick = () => $('#dir').click();
+$('#file').onchange = e => { load(e.target.files); e.target.value = ''; };
+$('#dir').onchange = e => { load(e.target.files); e.target.value = ''; };
+$('#compare').onclick = () => $('#oldfile').click();
+$('#oldfile').onchange = e => { load(e.target.files, true); e.target.value = ''; };
+$('#restart').onclick = () => { current = older = null; $('#results').hidden = true; $('#start').hidden = false; $('#error').hidden = true; };
+$('#q').oninput = render;
+$('#showHidden').onchange = render;
+document.querySelectorAll('[data-sort]').forEach(b => b.onclick = () => {
+  sortBy = b.dataset.sort;
+  document.querySelectorAll('[data-sort]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  render();
+});
+
+$('#csv').onclick = () => {
+  const l = lists.find(x => x.id === active);
+  const col = l.date.toLowerCase().replace(/ /g, '_');
+  const lines = [['username', 'profile_url', col, 'close_friend', 'mark'].join(',')]
+    .concat(l.recs.map(r => [r.name, profileUrl(r.name), fmtDate(r.ts), r.cf ? 'yes' : '', l.triage && marks[r.key] ? marks[r.key].m : ''].map(csvCell).join(',')));
+  download(slug(l) + '.csv', lines.join('\n') + '\n', 'text/csv');
+};
+$('#txt').onclick = () => {
+  const l = lists.find(x => x.id === active);
+  download(slug(l) + '.txt', visible(l).map(r => r.name).join('\n') + '\n');
+};
+$('#saveIgnore').onclick = () => {
+  const by = m => Object.values(marks).filter(x => x.m === m).map(x => x.name).sort();
+  const section = (h, names) => names.length ? ['', '# ' + h, ...names] : [];
+  const all = [...by('ignored'), ...by('gone'), ...by('keep')];
+  if (!all.length) { alert('Nothing marked dead or keep yet.'); return; }
+  download('ignore.txt', ['# Usernames hidden from future runs of Followback / ig_followback.py',
+    '# Generated ' + new Date().toISOString().slice(0, 10),
+    ...section('Imported', by('ignored')), ...section('Dead: deleted, banned or renamed', by('gone')),
+    ...section('Keep: following on purpose', by('keep'))].join('\n') + '\n');
+};
+$('#loadIgnore').onclick = () => $('#ignorefile').click();
+$('#ignorefile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  let section = 'ignored', added = 0;
+  for (const raw of (await f.text()).split(/\r?\n/)) {
+    // Our own section headings say which mark a name had; anything else is "ignored".
+    const head = raw.trim().toLowerCase();
+    if (head.startsWith('# dead')) { section = 'gone'; continue; }
+    if (head.startsWith('# keep')) { section = 'keep'; continue; }
+    if (head.startsWith('# ')) { section = 'ignored'; }
+    const name = raw.split('#')[0].trim().replace(/^@/, '');
+    if (!name) continue;
+    if (!marks[name.toLowerCase()]) added++;
+    marks[name.toLowerCase()] = { m: section, name };
+  }
+  persist(); renderTabs(); render();
+  alert(`Imported ${added} new username${added === 1 ? '' : 's'}.`);
+};
+$('#clearMarks').onclick = () => {
+  if (!confirm('Clear all dead/keep marks and ticks? This can\'t be undone.')) return;
+  marks = {}; done = {}; persist(); renderTabs(); render();
+};
+</script>
+</body>
+</html>

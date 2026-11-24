@@ -2,26 +2,26 @@
 """
 Instagram follow-back cleanup (personal, offline).
 
-Reads the JSON files from your Instagram "Export your information" export
-(scope: Followers and following, format: JSON) and helps you clean up who you
-follow. It reports:
+Reads the .zip from Instagram's "Export your information" (scope: Followers and
+following, format: JSON) and helps you clean up who you follow. It reports:
   - people you follow who DON'T follow you back  (cleanup candidates)
   - people who follow you that you DON'T follow back
-  - mutuals count
+  - pending follow requests you've sent, mutuals, close friends
+  - with --since OLD.zip: who stopped following you, and who started
 
-and generates an action list to make manual unfollowing fast:
-  - cleanup.html             clickable profile links + checkboxes, sortable by follow date
-  - not_following_back.csv   username, profile_url, followed_on
-  - not_following_back.txt   bare usernames
+and writes clickable action lists (HTML, plus CSV and TXT) into the folder you
+run it from. Accounts marked dead or keep there can be saved to ignore.txt to
+keep them out of future runs.
 
 No login, no network, no API. Everything runs locally on the export files.
 Automated unfollowing is intentionally NOT included: it violates Instagram's
 Terms of Service and risks action against your account.
 
 Usage:
-    python ig_followback.py /path/to/connections/followers_and_following
-or drop this script into that folder and just run:
-    python ig_followback.py
+    python3 ig_followback.py instagram-yourname-2026-09-08.zip
+    python3 ig_followback.py new.zip --since old.zip
+Also accepts the unzipped export, or its connections/followers_and_following
+folder. --help lists the options.
 """
 
 from __future__ import annotations
@@ -219,12 +219,16 @@ class _ExportSource:
             raise ExportError(f"{name} in {self.label} is not readable JSON: {err}")
 
 
+_ANCHORS = ("following.json", "following.html")
+
+
 def _zip_source(path: Path) -> _ExportSource:
     archive = zipfile.ZipFile(path)
     members = [m for m in archive.namelist() if not m.endswith("/")]
-    # Anchor on following.json so the export folder is found wherever it sits.
+    # Anchor on following.json so the export folder is found wherever it sits;
+    # following.html finds an HTML-format export, so it can be named as such.
     anchor_member = next(
-        (m for m in members if m.rsplit("/", 1)[-1] == "following.json"), None)
+        (m for anchor in _ANCHORS for m in members if m.rsplit("/", 1)[-1] == anchor), None)
     prefix = anchor_member.rsplit("/", 1)[0] + "/" if anchor_member and "/" in anchor_member else ""
     names = {m[len(prefix):]: m for m in members
              if m.startswith(prefix) and "/" not in m[len(prefix):]}
@@ -235,9 +239,11 @@ def _dir_source(path: Path) -> _ExportSource:
     folder = path
     if not (folder / "following.json").exists():
         # Point at the unzipped export root and we'll find the folder inside.
-        found = sorted(path.rglob("following.json"), key=lambda q: len(q.parts))
-        if found:
-            folder = found[0].parent
+        for anchor in _ANCHORS:
+            found = sorted(path.rglob(anchor), key=lambda q: len(q.parts))
+            if found:
+                folder = found[0].parent
+                break
     names = {q.name: q for q in folder.iterdir() if q.is_file()}
     return _ExportSource(str(folder), names, lambda q: q.read_bytes())
 
@@ -259,6 +265,10 @@ def _as_source(folder) -> _ExportSource:
 
 
 def _load_following(source: _ExportSource, stats: ParseStats | None = None) -> dict[str, dict]:
+    if not source.exists("following.json") and source.exists("following.html"):
+        raise ExportError(
+            f"{source.label} is an HTML-format export, which can't be read reliably. "
+            f"Request a new export and choose Format: JSON.")
     if not source.exists("following.json"):
         raise ExportError(f"Could not find following.json in {source.label}")
     data = source.read_json("following.json")
@@ -308,6 +318,39 @@ def load_pending_requests(folder, stats: ParseStats | None = None) -> dict[str, 
     return _extract_accounts(blocks, stats)
 
 
+# Optional lists that ship in the same folder of a "Followers and following"
+# export. Each is a dict holding one "relationships_*" list, or a bare list.
+CLOSE_FRIENDS_FILE = "close_friends.json"
+RECENTLY_UNFOLLOWED_FILE = "recently_unfollowed_profiles.json"
+BLOCKED_FILE = "blocked_profiles.json"
+RESTRICTED_FILE = "restricted_profiles.json"
+
+
+def _blocks_from(data) -> list:
+    """The relationship blocks in an export file, whatever its top-level key."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for value in data.values():
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def load_optional_list(folder, filename: str) -> dict[str, dict]:
+    """Load one of the optional relationship lists, or {} if it isn't there.
+
+    These files only exist when they have something in them (no close friends,
+    no close_friends.json), so absence is normal and never an error. Their
+    anomalies aren't counted in ParseStats: the rows they produce are
+    flags and counts, not links the user is asked to open.
+    """
+    source = _as_source(folder)
+    if not source.exists(filename):
+        return {}
+    return _extract_accounts(_blocks_from(source.read_json(filename)))
+
+
 # --------------------------------------------------------------------------- #
 # Diffing
 # --------------------------------------------------------------------------- #
@@ -353,6 +396,45 @@ def compute_diff(following: dict[str, dict], followers: dict[str, dict]) -> Diff
         fans_you_dont_follow_back=_sorted_records(follower_names - following_names, followers),
         mutuals=len(following_names & follower_names),
     )
+
+
+@dataclass
+class Changes:
+    """What moved between an older export and a newer one."""
+    lost_followers: list[dict]  # followed you before, don't now
+    new_followers: list[dict]   # follow you now, didn't before
+    you_unfollowed: list[dict]  # you followed them before, don't now
+    you_followed: list[dict]    # you follow them now, didn't before
+
+
+def compare_exports(old_following: dict[str, dict], old_followers: dict[str, dict],
+                    new_following: dict[str, dict], new_followers: dict[str, dict]) -> Changes:
+    """Diff two exports of the same account.
+
+    A lost follower may also be an account that was deactivated or deleted in
+    between: the export carries no account ID, so the two look identical.
+    """
+    return Changes(
+        lost_followers=_sorted_records(set(old_followers) - set(new_followers), old_followers),
+        new_followers=_sorted_records(set(new_followers) - set(old_followers), new_followers),
+        you_unfollowed=_sorted_records(set(old_following) - set(new_following), old_following),
+        you_followed=_sorted_records(set(new_following) - set(old_following), new_following),
+    )
+
+
+def latest_timestamp(*account_maps: dict[str, dict]) -> int:
+    """The most recent follow timestamp across maps -- a proxy for export age."""
+    return max((info.get("timestamp") or 0
+                for accounts in account_maps for info in accounts.values()), default=0)
+
+
+def flag_close_friends(records: list[dict], close_friends: dict[str, dict]) -> int:
+    """Mark records that are on your Close Friends list; returns how many."""
+    flagged = 0
+    for record in records:
+        record["close_friend"] = record["username"].casefold() in close_friends
+        flagged += record["close_friend"]
+    return flagged
 
 
 # --------------------------------------------------------------------------- #
@@ -425,20 +507,25 @@ _HTML_TEMPLATE = r"""<!doctype html>
   a { color: #0a66c2; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .find { font-size: .8rem; color: #888; margin-left: .5rem; }
-  .dead, .copy { font-size: .8rem; padding: .15rem .45rem; }
-  .copy { margin-right: .25rem; }
+  .dead, .copy, .keep { font-size: .8rem; padding: .15rem .45rem; margin-right: .25rem; }
   tr.gone .dead { background: #fde68a; border-color: #d97706; }
+  tr.kept { opacity: .55; background: #f0f7ff; }
+  tr.kept .keep { background: #bfdbfe; border-color: #2563eb; }
+  .tag { font-size: .7rem; background: #dcfce7; color: #166534; border-radius: 4px; padding: .05rem .35rem; margin-left: .4rem; white-space: nowrap; }
+  body.plain .dead, body.plain .keep, body.plain #save, body.plain .note { display: none; }
   .hint { color: #999; font-size: .85rem; }
   .note { background: #f7f7f7; border-left: 3px solid #ddd; padding: .6rem .8rem; margin: 1rem 0; font-size: .9rem; color: #555; }
 </style>
 </head>
-<body>
+<body class="__BODY_CLASS__">
 <h1>__TITLE__</h1>
 <p class="meta">__INTRO__</p>
 <div class="note">Link says <em>“Sorry, this page isn’t available”</em>? The account was
 deleted, banned, or renamed. Hit <strong>find</strong> to search for it, or mark it
-<strong>dead</strong> and press <strong>Save ignore.txt</strong> — put that file next to the
-script and those accounts stay out of future runs.</div>
+<strong>dead</strong>. Following someone on purpose who will never follow back (a brand, an
+artist, a news account)? Mark it <strong>keep</strong>. Then press <strong>Save ignore.txt</strong>
+and put that file in the folder you run the script from: those accounts stay out of
+future runs. Rows tagged <span class="tag">close friend</span> are on your Close Friends list.</div>
 <div class="bar">
   <input type="search" id="q" placeholder="Filter usernames…" autocomplete="off">
   <span id="count"></span>
@@ -456,6 +543,9 @@ __ROWS__
 <p class="hint">Click a column header to sort. Marks are saved in this browser.</p>
 <script>
 const KEY = '__STATE_KEY__';
+// Usernames already in the ignore file this list was generated with. They are
+// hidden from the table, so Save has to carry them over or they'd come back.
+const PRIOR = __PRIOR__;
 const tbody = document.querySelector('#t tbody');
 const rows = () => [...tbody.querySelectorAll('tr')];
 
@@ -468,6 +558,7 @@ function paint(tr) {
   const s = state[tr.dataset.username];
   tr.classList.toggle('done', s === 'done');
   tr.classList.toggle('gone', s === 'gone');
+  tr.classList.toggle('kept', s === 'keep');
   tr.querySelector('input[type=checkbox]').checked = s === 'done';
   tr.dataset.done = s === 'done' ? '1' : '0';
 }
@@ -517,24 +608,36 @@ async function copyUsername(btn) {
 
 tbody.addEventListener('click', e => {
   if (e.target.classList.contains('copy')) { copyUsername(e.target); return; }
-  if (!e.target.classList.contains('dead')) return;
+  const mark = e.target.classList.contains('dead') ? 'gone'
+             : e.target.classList.contains('keep') ? 'keep' : null;
+  if (!mark) return;
   const tr = e.target.closest('tr');
-  if (state[tr.dataset.username] === 'gone') delete state[tr.dataset.username];
-  else state[tr.dataset.username] = 'gone';
+  if (state[tr.dataset.username] === mark) delete state[tr.dataset.username];
+  else state[tr.dataset.username] = mark;
   paint(tr); save(); count();
 });
 
 document.querySelector('#q').addEventListener('input', e => {
   const q = e.target.value.toLowerCase();
-  rows().forEach(tr => { tr.hidden = q && !tr.dataset.username.includes(q); });
+  rows().forEach(tr => { tr.hidden = q && !tr.dataset.username.toLowerCase().includes(q); });
 });
 
 document.querySelector('#save').addEventListener('click', () => {
-  const names = Object.keys(state).sort();
-  if (!names.length) { alert('Nothing marked yet.'); return; }
+  const marked = Object.keys(state);
+  if (!marked.length && !PRIOR.length) { alert('Nothing marked yet.'); return; }
+  const seen = new Set();
+  const section = (heading, names) => {
+    const fresh = names.filter(n => !seen.has(n.toLowerCase())).sort();
+    fresh.forEach(n => seen.add(n.toLowerCase()));
+    return fresh.length ? ['', '# ' + heading, ...fresh] : [];
+  };
+  const by = mark => marked.filter(n => state[n] === mark);
   const body = ['# Usernames hidden from future runs of ig_followback.py',
                 '# Generated ' + new Date().toISOString().slice(0, 10),
-                ...names].join('\n') + '\n';
+                ...section('Already in your ignore list', PRIOR),
+                ...section('Dead: deleted, banned or renamed', by('gone')),
+                ...section('Keep: following on purpose', by('keep')),
+                ...section('Handled', by('done'))].join('\n') + '\n';
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([body], {type: 'text/plain'}));
   a.download = 'ignore.txt';
@@ -577,8 +680,14 @@ def _search_url(username: str) -> str:
 
 
 def _render_action_list(title: str, intro: str, records: list[dict],
-                        date_label: str = "Followed on") -> str:
-    """Render a sortable, checkbox action list for any set of account records."""
+                        date_label: str = "Followed on", prior: list[str] | None = None,
+                        triage: bool = True) -> str:
+    """Render a sortable, checkbox action list for any set of account records.
+
+    prior: usernames already in the ignore file, carried into its next save.
+    triage: False for read-only reports (changes between exports), which hides
+            the dead/keep/ignore-file tools that only make sense for cleanup.
+    """
     rows = []
     for acc in records:
         user = html.escape(acc["username"])
@@ -586,14 +695,17 @@ def _render_action_list(title: str, intro: str, records: list[dict],
         find = html.escape(_search_url(acc["username"]), quote=True)
         # 'unknown' sorts after real dates as a data attribute too (~ > digits).
         sort_date = acc["followed_on"] if acc["followed_on"] != "unknown" else "~"
+        tag = ('<span class="tag" title="On your Close Friends list">close friend</span>'
+               if acc.get("close_friend") else "")
         rows.append(
             f'<tr data-username="{user}" data-date="{html.escape(sort_date)}" data-done="0">'
             f'<td><input type="checkbox"></td>'
             f'<td><a class="u" href="{url}" target="_blank" rel="noopener">{user}</a>'
-            f'<a class="find" href="{find}" target="_blank" rel="noopener">find</a></td>'
+            f'<a class="find" href="{find}" target="_blank" rel="noopener">find</a>{tag}</td>'
             f'<td>{html.escape(acc["followed_on"])}</td>'
             f'<td><button class="copy" type="button" title="Copy username, to paste into your Following list search">copy</button>'
-            f'<button class="dead" type="button" title="Deleted, banned or renamed">dead</button></td>'
+            f'<button class="dead" type="button" title="Deleted, banned or renamed">dead</button>'
+            f'<button class="keep" type="button" title="Following on purpose: hide from future runs">keep</button></td>'
             f'</tr>'
         )
     # A per-list key so the two action lists don't share triage marks.
@@ -603,21 +715,26 @@ def _render_action_list(title: str, intro: str, records: list[dict],
         "__INTRO__": html.escape(intro),
         "__DATE_LABEL__": html.escape(date_label),
         "__STATE_KEY__": html.escape(state_key, quote=True),
+        "__BODY_CLASS__": "" if triage else "plain",
+        # JSON inside <script>: escape "<" so no value can close the tag.
+        "__PRIOR__": json.dumps(sorted(prior or [])).replace("<", "\\u003c"),
         "__ROWS__": "\n".join(rows),
     }
-    out = _HTML_TEMPLATE
-    for placeholder, value in replacements.items():
-        out = out.replace(placeholder, value)
-    return out
+    # One pass over the template, so a substituted value -- a username can
+    # legally be "__ROWS__" -- is never itself treated as a placeholder.
+    pattern = re.compile("|".join(map(re.escape, replacements)))
+    return pattern.sub(lambda m: replacements[m.group(0)], _HTML_TEMPLATE)
 
 
 def _write_list(records: list[dict], html_path: Path, csv_path: Path, txt_path: Path,
-                title: str, intro: str, date_label: str) -> list[Path]:
+                title: str, intro: str, date_label: str, prior: list[str] | None = None,
+                triage: bool = True) -> list[Path]:
     """Write an HTML action list plus CSV and TXT for a set of account records."""
     date_field = date_label.lower().replace(" ", "_")  # "Followed on" -> "followed_on"
 
     html_path.write_text(
-        _render_action_list(title, intro, records, date_label), encoding="utf-8"
+        _render_action_list(title, intro, records, date_label, prior, triage),
+        encoding="utf-8"
     )
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -631,45 +748,71 @@ def _write_list(records: list[dict], html_path: Path, csv_path: Path, txt_path: 
 
 
 def write_outputs(candidates: list[dict], pending: list[dict], out_dir: Path,
-                  fans: list[dict] | None = None) -> list[Path]:
-    """Write the unfollow action list, plus pending requests and fans if any.
+                  fans: list[dict] | None = None, prior: list[str] | None = None,
+                  recently_unfollowed: list[dict] | None = None,
+                  changes: Changes | None = None) -> list[Path]:
+    """Write the unfollow action list, plus every other list that has content.
 
     Files are written into out_dir (the directory the script is run from),
     not the export folder, so running the tool doesn't litter your export.
+    prior is the ignore list in effect, carried into the next save of it.
     Returns the paths written.
     """
+    def out(stem):
+        return out_dir / f"{stem}.html", out_dir / f"{stem}.csv", out_dir / f"{stem}.txt"
+
+    html_path, csv_path, txt_path = out_dir / "cleanup.html", *out("not_following_back")[1:]
+    flagged = sum(1 for r in candidates if r.get("close_friend"))
     written = _write_list(
-        candidates,
-        out_dir / "cleanup.html",
-        out_dir / "not_following_back.csv",
-        out_dir / "not_following_back.txt",
+        candidates, html_path, csv_path, txt_path,
         title="Not following you back",
         intro=f"{len(candidates)} accounts you follow who don't follow you back. "
-              "Tick the box once you've unfollowed someone in the app.",
-        date_label="Followed on",
+              "Tick the box once you've unfollowed someone in the app."
+              + (f" {flagged} of them are on your Close Friends list." if flagged else ""),
+        date_label="Followed on", prior=prior,
     )
     if pending:
         written += _write_list(
-            pending,
-            out_dir / "pending_requests.html",
-            out_dir / "pending_requests.csv",
-            out_dir / "pending_requests.txt",
+            pending, *out("pending_requests"),
             title="Pending sent follow requests",
             intro=f"{len(pending)} follow requests you've sent that haven't been "
                   "accepted yet. Open a profile to cancel the request if you want; "
                   "tick the box to mark it handled.",
-            date_label="Requested on",
+            date_label="Requested on", prior=prior,
         )
     if fans:
         written += _write_list(
-            fans,
-            out_dir / "you_dont_follow_back.html",
-            out_dir / "you_dont_follow_back.csv",
-            out_dir / "you_dont_follow_back.txt",
+            fans, *out("you_dont_follow_back"),
             title="You don't follow them back",
             intro=f"{len(fans)} accounts that follow you but you don't follow "
                   "back. Tick the box once you've decided about someone.",
-            date_label="Followed you on",
+            date_label="Followed you on", prior=prior,
+        )
+    if recently_unfollowed:
+        written += _write_list(
+            recently_unfollowed, *out("recently_unfollowed"),
+            title="Recently unfollowed",
+            intro=f"{len(recently_unfollowed)} accounts Instagram lists as recently "
+                  "unfollowed by you -- the cleanup you've already done.",
+            date_label="Unfollowed on", triage=False,
+        )
+    if changes is not None:
+        # Always written when comparing, even empty, so a stale file from an
+        # earlier comparison never passes for this one.
+        written += _write_list(
+            changes.lost_followers, *out("unfollowed_you"),
+            title="Stopped following you",
+            intro=f"{len(changes.lost_followers)} accounts followed you in the older "
+                  "export and don't in this one. Some may have deactivated or deleted "
+                  "their account instead -- an export can't tell the two apart.",
+            date_label="Followed you on", triage=False,
+        )
+        written += _write_list(
+            changes.new_followers, *out("new_followers"),
+            title="New followers",
+            intro=f"{len(changes.new_followers)} accounts follow you now that didn't "
+                  "in the older export.",
+            date_label="Followed you on", triage=False,
         )
     return written
 
@@ -685,10 +828,12 @@ _EXPORT_HELP = (
     "gives you, or at any folder inside it."
 )
 
+# Rows printed per section before pointing at the HTML list instead.
+PRINT_LIMIT = 20
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="ig_followback.py",
         description="Find who you follow on Instagram that doesn't follow you back, "
                     "offline, from your data export.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -704,6 +849,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
              "(default: current directory)",
     )
     parser.add_argument(
+        "--since", metavar="OLD_EXPORT", type=Path, default=None,
+        help="an older export of the same account: also report who stopped "
+             "following you and who started, between the two",
+    )
+    parser.add_argument(
         "--ignore", metavar="FILE", type=Path, default=None,
         help=f"usernames to hide from the action list, one per line "
              f"(default: {IGNORE_FILENAME} in the current directory, if present)",
@@ -712,57 +862,114 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--no-ignore", action="store_true",
         help="show every account, even ones listed in the ignore file",
     )
+    parser.add_argument(
+        "--print-all", action="store_true",
+        help=f"print every account in the terminal, not just the first {PRINT_LIMIT} "
+             f"of each list",
+    )
     return parser.parse_args(argv)
+
+
+def _print_section(heading: str, records: list[dict], verb: str, limit: int | None,
+                   more_in: str) -> None:
+    print(f"\n=== {heading} ===")
+    if not records:
+        print("  (none)")
+        return
+    for acc in records[:limit]:
+        tag = "  [close friend]" if acc.get("close_friend") else ""
+        print(f"  {acc['username']:<30} {verb} {acc['followed_on']}  {acc['profile_url']}{tag}")
+    if limit is not None and len(records) > limit:
+        print(f"  ... and {len(records) - limit} more -- see {more_in}, "
+              f"or pass --print-all")
+
+
+def _load_export(path: Path, stats: ParseStats | None):
+    source = open_export(path)  # opened once and shared, so a zip isn't reopened
+    following, followers = load_accounts(source, stats)
+    return source, following, followers
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    folder = args.folder
     out_dir = Path.cwd()
+    limit = None if args.print_all else PRINT_LIMIT
 
     stats = ParseStats()
     try:
-        # Opened once and shared, so a zip isn't reopened per file.
-        source = open_export(folder)
-        following, followers = load_accounts(source, stats)
+        source, following, followers = _load_export(args.folder, stats)
         pending_accounts = load_pending_requests(source, stats)
+        close_friends = load_optional_list(source, CLOSE_FRIENDS_FILE)
+        recent = load_optional_list(source, RECENTLY_UNFOLLOWED_FILE)
+        blocked = load_optional_list(source, BLOCKED_FILE)
+        restricted = load_optional_list(source, RESTRICTED_FILE)
+        old = _load_export(args.since, None) if args.since else None
     except ExportError as err:
         sys.exit(f"{err}\n\n{_EXPORT_HELP}")
     diff = compute_diff(following, followers)
     candidates = diff.not_following_back
     pending = _sorted_records(set(pending_accounts), pending_accounts)
+    recently_unfollowed = _sorted_records(set(recent), recent)
 
     ignore_path = args.ignore or (out_dir / IGNORE_FILENAME)
     ignored = set() if args.no_ignore else load_ignore_list(ignore_path)
     candidates, hidden = apply_ignore_list(candidates, ignored)
     pending, pending_hidden = apply_ignore_list(pending, ignored)
     fans, fans_hidden = apply_ignore_list(diff.fans_you_dont_follow_back, ignored)
+    close_not_back = flag_close_friends(candidates, close_friends)
+    flag_close_friends(fans, close_friends)
+
+    changes = None
+    if old is not None:
+        _, old_following, old_followers = old
+        changes = compare_exports(old_following, old_followers, following, followers)
+        flag_close_friends(changes.lost_followers, close_friends)
 
     print(f"Following:             {len(following)}")
     print(f"Followers:             {len(followers)}")
     print(f"Mutuals:               {diff.mutuals}")
-    print(f"Don't follow you back: {len(candidates)}")
+    print(f"Don't follow you back: {len(candidates)}"
+          + (f"  ({close_not_back} on your Close Friends list)" if close_not_back else ""))
     print(f"You don't follow back: {len(fans)}")
     print(f"Pending sent requests: {len(pending)}")
+    if close_friends:
+        print(f"Close friends:         {len(close_friends)}")
+    if recent:
+        print(f"Recently unfollowed:   {len(recent)}")
+    if blocked or restricted:
+        print(f"Blocked / restricted:  {len(blocked)} / {len(restricted)}")
     if hidden or pending_hidden or fans_hidden:
         print(f"Hidden by {ignore_path.name}:   {hidden + pending_hidden + fans_hidden}")
-    print()
 
-    print("=== Not following you back (candidates to unfollow) ===")
-    for acc in candidates:
-        print(f"  {acc['username']:<30} followed {acc['followed_on']}  {acc['profile_url']}")
-
+    _print_section("Not following you back (candidates to unfollow)", candidates,
+                   "followed", limit, "cleanup.html")
     if pending:
-        print("\n=== Pending follow requests you've sent (awaiting acceptance) ===")
-        for acc in pending:
-            print(f"  {acc['username']:<30} requested {acc['followed_on']}  {acc['profile_url']}")
+        _print_section("Pending follow requests you've sent (awaiting acceptance)",
+                       pending, "requested", limit, "pending_requests.html")
 
-    written = write_outputs(candidates, pending, out_dir, fans)
+    if changes is not None:
+        print(f"\n=== Changes since {args.since.name} ===")
+        print(f"Stopped following you: {len(changes.lost_followers)}")
+        print(f"New followers:         {len(changes.new_followers)}")
+        print(f"You unfollowed:        {len(changes.you_unfollowed)}")
+        print(f"You started following: {len(changes.you_followed)}")
+        if latest_timestamp(*old[1:]) > latest_timestamp(following, followers):
+            print(f"  Note: {args.since.name} has more recent follows than "
+                  f"{args.folder.name}. Did you swap them? The older export goes "
+                  f"after --since.")
+        _print_section("Stopped following you", changes.lost_followers,
+                       "followed you", limit, "unfollowed_you.html")
+
+    written = write_outputs(candidates, pending, out_dir, fans,
+                            prior=sorted(ignored), recently_unfollowed=recently_unfollowed,
+                            changes=changes)
     print(f"\nSaved {len(candidates)} unfollow candidates"
           + (f" and {len(pending)} pending requests" if pending else "")
           + ". Open the action list(s):")
     for path in written:
-        print(f"  {path}")
+        if path.suffix == ".html":
+            print(f"  {path}")
+    print("  (each also has a .csv and a .txt next to it)")
     if stats.total:
         print(f"\nParsing notes for this export:")
         if stats.skipped:
@@ -780,7 +987,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\nBroken profile link? The account was most likely deleted, deactivated or"
           f"\nbanned before this export was generated -- Instagram keeps those in your"
           f"\nfollowing list. Use the 'find' link to search for it, or mark it 'dead'"
-          f"\nand save {IGNORE_FILENAME} next to this script to keep it out of future runs.")
+          f"\n(or 'keep' for accounts you follow on purpose) and save {IGNORE_FILENAME}"
+          f"\nin this folder to keep them out of future runs.")
 
 
 if __name__ == "__main__":
