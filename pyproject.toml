@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "followback-ig"
+version = "0.2.0"
+description = "Find who doesn't follow you back on Instagram, offline, from your data export."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/hugoogb/followback-ig"
+
+[project.scripts]
+followback = "ig_followback:main"
+
+[tool.setuptools]
+py-modules = ["ig_followback"]

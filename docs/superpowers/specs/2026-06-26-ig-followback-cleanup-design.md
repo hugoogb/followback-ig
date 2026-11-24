@@ -88,3 +88,15 @@ Run: `python3 -m unittest test_ig_followback -v`.
 - Any login, scraping, or automated unfollowing.
 - A whitelist (explicitly declined).
 - Networked profile enrichment (follower counts, bios, etc.).
+
+## Later additions (2026-11)
+
+- **Keep mark** — supersedes "Whitelist: none". Accounts followed on purpose
+  are marked *keep* in the action list and saved to `ignore.txt` alongside
+  *dead* ones; saving merges with the ignore list already in effect.
+- **Optional export files** — close friends (tagged), recently unfollowed (own
+  list), blocked/restricted (counted).
+- **`--since OLD_EXPORT`** — who stopped following you and who started.
+- **Browser version** (`web/index.html`) — a port of the parser and the action
+  list that reads the zip in the page, under a CSP that forbids network access.
+  `web/test_web.cjs` checks it against the Python tool.

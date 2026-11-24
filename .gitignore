@@ -34,3 +34,17 @@ pending_requests.txt
 you_dont_follow_back.html
 you_dont_follow_back.csv
 you_dont_follow_back.txt
+recently_unfollowed.html
+recently_unfollowed.csv
+recently_unfollowed.txt
+unfollowed_you.html
+unfollowed_you.csv
+unfollowed_you.txt
+new_followers.html
+new_followers.csv
+new_followers.txt
+
+# Packaging
+build/
+*.egg-info/
+node_modules/
