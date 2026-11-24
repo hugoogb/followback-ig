@@ -6,7 +6,9 @@ on:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest (26.04) has no Python 3.9 build, and 3.9 is the
+    # oldest version pyproject.toml promises to support.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.9", "3.11", "3.13"]
